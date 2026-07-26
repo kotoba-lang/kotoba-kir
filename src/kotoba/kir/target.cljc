@@ -4,12 +4,6 @@
   {:wasm32-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :wasm :isa :wasm32 :os :unspecified :abi :wasm-mvp :runtime :kotoba-capability-host-v1}
    :wasm32-browser-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :wasm :isa :wasm32 :os :browser :abi :wasm-mvp :runtime :kotoba-browser-host-v1}
    :wasm32-wasi-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :wasm :isa :wasm32 :os :wasi :abi :wasm-mvp :runtime :kotoba-wasi-host-v1}
-   ;; ADR-2607252500: the default distributable application boundary.  The
-   ;; compiler first emits a core module with the canonical ABI exports and
-   ;; then seals it as a standards-compliant Component with the WIT world
-   ;; `kotoba:app/kotoba-app@0.1.0`.  It deliberately has no WASI imports;
-   ;; capabilities are added in later worlds, never ambiently.
-   :wasm-component-kotoba-v2 {:format :kotoba.target-profile/v1 :execution :component :isa :wasm32 :os :unspecified :abi :component-canonical-abi-v2 :runtime :kotoba-component-runtime-v2}
    :x86_64-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :native :isa :x86_64 :os :unspecified :abi :sysv :runtime :kotoba-supervisor-v1}
    :x86_64-linux-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :native :isa :x86_64 :os :linux :abi :sysv :runtime :kotoba-linux-supervisor-v1}
    :x86_64-macos-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :native :isa :x86_64 :os :macos :abi :sysv :runtime :kotoba-macos-supervisor-v1}

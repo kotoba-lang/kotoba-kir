@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [kotoba.kir]
             [kotoba.kir.value]
+            [kotoba.kir.cljs-i64]
             [kotoba.kir.target]
             [kotoba.kir.decimal]
             [kotoba.kir.xml]
@@ -13,6 +14,7 @@
 (deftest every-extracted-namespace-loads
   (is (some? (find-ns 'kotoba.kir)) "kotoba.kir must load")
   (is (some? (find-ns 'kotoba.kir.value)) "kotoba.kir.value must load")
+  (is (some? (find-ns 'kotoba.kir.cljs-i64)) "kotoba.kir.cljs-i64 must load")
   (is (some? (find-ns 'kotoba.kir.target)) "kotoba.kir.target must load")
   (is (some? (find-ns 'kotoba.kir.decimal)) "kotoba.kir.decimal must load")
   (is (some? (find-ns 'kotoba.kir.xml)) "kotoba.kir.xml must load")

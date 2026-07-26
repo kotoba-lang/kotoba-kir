@@ -27,12 +27,7 @@
                  (every? #{:allow :abac :attributes :information-flow
                            :crypto-required? :crypto-policy :crypto-envelope
                            :hardware-signing-required?
-                           :hardware-signing-evidence
-                           ;; Component-only, explicit authority descriptors.
-                           ;; They are validated again by core before lowering;
-                           ;; accepting the key here prevents an otherwise
-                           ;; valid grant from being discarded as "ambient".
-                           :component-abilities} (keys policy))
+                           :hardware-signing-evidence} (keys policy))
                  (or (not (contains? policy :allow)) (set? (:allow policy))))
     (throw (ex-info "malformed capability policy" {:phase :admission})))
   (let [required (set (:effects hir))
