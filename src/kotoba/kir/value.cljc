@@ -571,6 +571,9 @@
      (and (vector? type) (= 2 (count type)) (= :option (first type)))
      (do (validate-value-type! (second type) (inc depth) nodes)
          type)
+     (and (vector? type) (= 2 (count type)) (= :list (first type)))
+     (do (validate-value-type! (second type) (inc depth) nodes)
+         type)
      (and (vector? type) (= 2 (count type)) (= :vector (first type)))
      (let [item-types (second type)]
        (when-not (and (vector? item-types)
@@ -700,6 +703,12 @@
       (= :vector (first type))
       (compare-sequences (second type) (rest left) (rest right))
 
+      (= :list (first type))
+      (compare-sequences
+       (repeat (max (count (second left)) (count (second right)))
+               (second type))
+       (second left) (second right))
+
       (= :set (first type))
       (compare-sequences (repeat (max (count (second left)) (count (second right)))
                                  (second type))
@@ -792,6 +801,18 @@
                (map (fn [item-type item]
                       (bounded-typed-value! item-type item (inc depth) nodes))
                     item-types (rest value))))
+
+       (= :list (first type))
+       (let [item-type (second type)]
+         (when-not (and (vector? value) (= 2 (count value))
+                        (= type (first value))
+                        (vector? (second value))
+                        (<= (count (second value)) canonical-list-item-limit))
+           (throw (ex-info "value is not the declared bounded list"
+                           {:phase :value :limit canonical-list-item-limit})))
+         [type
+          (mapv #(bounded-typed-value! item-type % (inc depth) nodes)
+                (second value))])
 
        (= :set (first type))
        (let [item-type (second type)]

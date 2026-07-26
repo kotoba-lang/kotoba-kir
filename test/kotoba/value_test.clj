@@ -106,7 +106,24 @@
                    (value/bounded-typed-value! type invalid)))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"heterogeneous vector types"
                         (value/validate-value-type!
-                         [:vector (vec (repeat 33 :i64))]))))
+                        [:vector (vec (repeat 33 :i64))]))))
+
+(deftest bounded-list-values-seal-one-recursive-item-type
+  (let [item-type [:record :demo/item [[:x :i64] [:enabled :bool]]]
+        type [:list item-type]
+        first-item [item-type 7 true]
+        second-item [item-type -2 false]]
+    (is (= type (value/validate-value-type! type)))
+    (is (= [type [first-item second-item]]
+           (value/bounded-typed-value!
+            type [type [first-item second-item]])))
+    (is (neg? (value/compare-typed-values
+               type [type [second-item]] [type [first-item]])))
+    (doseq [invalid [[type (list first-item)]
+                     [type [[item-type 7 2]]]
+                     [type [first-item] :extra]]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (value/bounded-typed-value! type invalid))))))
 
 (deftest typed-set-values-are-unique-canonically-ordered-and-bounded
   (let [type [:set :i64]
