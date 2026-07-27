@@ -5,6 +5,9 @@
 
 (def string-literal-byte-limit 4096)
 (def string-value-byte-limit 65536)
+;; Opaque binary payload bound for kit/runtime `:bytes` (stream-object
+;; max-pull-bytes). Same magnitude as string-value-byte-limit deliberately.
+(def bytes-value-byte-limit 65536)
 (def keyword-value-byte-limit 512)
 (def symbol-value-byte-limit 512)
 (def map-entry-limit 128)
@@ -244,6 +247,43 @@
       (throw (ex-info "string exceeds UTF-8 byte limit"
                       {:phase :value :bytes bytes :limit limit})))
     value))
+
+(defn bytes-value?
+  "Host representation of kit/runtime `:bytes`: a raw byte array on JVM,
+  a `Uint8Array` on cljs/nbb. Not a string — UTF-8 is not assumed."
+  [value]
+  #?(:clj (bytes? value)
+     :cljs (instance? js/Uint8Array value)))
+
+(defn bytes-byte-count
+  "Length in bytes of a host `:bytes` value. Throws if not bytes."
+  [value]
+  (when-not (bytes-value? value)
+    (throw (ex-info "value is not bytes" {:phase :value :value value})))
+  #?(:clj (alength ^bytes value)
+     :cljs (.-byteLength value)))
+
+(defn bounded-bytes!
+  "Admit a host `:bytes` value whose length is ≤ `limit` (default
+  `bytes-value-byte-limit`). Returns the same object (no copy)."
+  ([value] (bounded-bytes! value bytes-value-byte-limit))
+  ([value limit]
+   (let [n (bytes-byte-count value)]
+     (when-not (and (integer? limit) (<= 0 limit))
+       (throw (ex-info "bytes limit is invalid" {:phase :value :limit limit})))
+     (when (> n limit)
+       (throw (ex-info "bytes value exceeds byte limit"
+                       {:phase :value :bytes n :limit limit})))
+     value)))
+
+(defn utf8-string->bytes
+  "Construct a host `:bytes` value from a UTF-8 string. Fixture/test helper
+  and host bridge — not a guest language op."
+  [s]
+  (when-not (string? s)
+    (throw (ex-info "utf8-string->bytes requires a string" {:phase :value})))
+  #?(:clj (.getBytes ^String s StandardCharsets/UTF_8)
+     :cljs (.encode (js/TextEncoder.) s)))
 
 (defn utf8-substring!
   "Checked UTF-8 byte-offset substring. Both offsets must be code-point
@@ -811,7 +851,7 @@
 
 (def ^:private leaf-value-types
   #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :option-i64 :result-i64
-    :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
+    :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :bytes})
 
 (defn validate-value-type!
   ([type] (validate-value-type! type 0 (volatile! 0)))
@@ -940,6 +980,17 @@
   (case type
     :i64 (compare left right)
     :string (compare left right)
+    :bytes (let [n (min (bytes-byte-count left) (bytes-byte-count right))]
+             (loop [i 0]
+               (if (< i n)
+                 (let [a #?(:clj (bit-and 0xff (aget ^bytes left i))
+                            :cljs (aget left i))
+                       b #?(:clj (bit-and 0xff (aget ^bytes right i))
+                            :cljs (aget right i))]
+                   (if (= a b)
+                     (recur (inc i))
+                     (compare a b)))
+                 (compare (bytes-byte-count left) (bytes-byte-count right)))))
     :keyword (compare (str left) (str right))
     :symbol (compare (str left) (str right))
     :bool (compare left right)
@@ -1060,6 +1111,9 @@
      :string (let [validated (bounded-string! value string-value-byte-limit)]
                (charge-indirect! (utf8-byte-count! validated))
                validated)
+     :bytes (let [validated (bounded-bytes! value bytes-value-byte-limit)]
+              (charge-indirect! (bytes-byte-count validated))
+              validated)
      :keyword (let [validated (bounded-keyword! value keyword-value-byte-limit)]
                 (charge-indirect! (utf8-byte-count! (str validated)))
                 validated)
