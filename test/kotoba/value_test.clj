@@ -138,6 +138,26 @@
          #"aggregate indirect byte limit"
          (value/bounded-typed-value! type over-limit)))))
 
+(deftest nested-lists-share-one-aggregate-item-budget
+  (let [inner [:list :i64]
+        outer [:list inner]
+        at-limit [outer [[inner (vec (repeat 16383 0))]]]
+        over-limit [outer [[inner (vec (repeat 16384 0))]]]
+        validate
+        (fn [typed-value]
+          ;; This arity exposes the shared validation state. Offset the
+          ;; independent ADT-node counter so this test isolates cardinality.
+          (value/bounded-typed-value!
+           outer typed-value 0 (volatile! -20000)
+           (volatile! 0) (volatile! 0)))]
+    (is (= value/canonical-list-total-item-limit
+           value/canonical-list-item-limit))
+    (is (= at-limit (validate at-limit)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"aggregate list item limit"
+         (validate over-limit)))))
+
 (deftest typed-set-values-are-unique-canonically-ordered-and-bounded
   (let [type [:set :i64]
         option-type [:option :string]
