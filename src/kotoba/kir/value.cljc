@@ -734,6 +734,32 @@
                 (recur (next remaining-types) (next left-items) (next right-items))
                 comparison)))))
 
+(defn- schema-ref-type?
+  [type]
+  (and (vector? type) (= 2 (count type)) (= :ref (first type))
+       (keyword? (second type)) (namespace (second type))))
+
+(defn- nominal-value-type
+  "Full :variant / :record descriptor carried as slot 0 of a nominal value."
+  [value]
+  (when (vector? value)
+    (let [head (first value)]
+      (when (and (vector? head) (#{:variant :record} (first head))
+                 (keyword? (second head)) (namespace (second head)))
+        head))))
+
+(defn- resolve-schema-ref-type
+  "Resolve [:ref :ns/name] against a value that carries its full nominal type.
+  Handles stay out of the application model: the value is still the full
+  tagged tree; the ref is only a type-level alias into a sealed schema."
+  [type value]
+  (let [root (second type)
+        value-type (nominal-value-type value)]
+    (when-not (and value-type (= root (second value-type)))
+      (throw (ex-info "value is not the declared schema ref"
+                      {:phase :value :ref root :value-type value-type})))
+    value-type))
+
 (defn compare-typed-values
   "Language-owned total order for already validated values of one type."
   [type left right]
@@ -767,6 +793,14 @@
                types (cycle [:keyword :i64])]
            (compare-sequences types left-items right-items))
     (cond
+      (schema-ref-type? type)
+      (let [left-type (resolve-schema-ref-type type left)
+            right-type (resolve-schema-ref-type type right)]
+        (when-not (= left-type right-type)
+          (throw (ex-info "schema ref values disagree on nominal type"
+                          {:phase :value :left left-type :right right-type})))
+        (compare-typed-values left-type left right))
+
       (= :option (first type))
       (if (= (second left) (second right))
         (if (second left)
@@ -815,7 +849,6 @@
 
       :else (throw (ex-info "value type has no canonical order"
                             {:phase :value :type type})))))
-
 (defn bounded-typed-value!
   "Validate a value under a canonical possibly-parametric type descriptor.
   Recursive values share fixed depth, node, and aggregate indirect-byte
@@ -986,6 +1019,10 @@
                       (bounded-typed-value! field-type field-value (inc depth)
                                             nodes indirect-bytes list-items))
                     fields (rest value))))
+
+       (schema-ref-type? type)
+       (bounded-typed-value! (resolve-schema-ref-type type value) value
+                             depth nodes indirect-bytes list-items)
 
        :else (throw (ex-info "value type is outside the safe profile"
                              {:phase :value})))))))
