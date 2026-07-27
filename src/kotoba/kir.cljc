@@ -74,7 +74,7 @@
      document-vector-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
      document-vector-remove
      document-assoc document-dissoc document-merge document-string-value document-keyword-value
-     document-bool-value document-i64-value document-f64-value document-sha256
+     document-bool-value document-i64-value document-f64-value document-sha256 document-print document-read
      i32-wrap u32-wrap i32-wrapping-add i32-wrapping-mul i32-xor
      i32-shift-left i32-shift-right u32-shift-right xorshift32
      bit-or bit-not i64-shift-left i64-shift-right u64-shift-right
@@ -1916,6 +1916,16 @@
         (= op 'document-sha256)
         (value/document-sha256-hex
          (eval-expr (first args) env functions fuel heap call-stack cap-call))
+
+        (= op 'document-print)
+        (value/document-print
+         (eval-expr (first args) env functions fuel heap call-stack cap-call))
+
+        (= op 'document-read)
+        (value/document-read
+         (value/bounded-string!
+          (eval-expr (first args) env functions fuel heap call-stack cap-call)
+          value/string-value-byte-limit))
 
         (contains? '#{document-contains document-get document-assoc document-dissoc} op)
         (let [[document-form key-form item-form] args

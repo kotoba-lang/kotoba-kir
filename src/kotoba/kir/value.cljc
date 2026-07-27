@@ -635,6 +635,180 @@
               (apply str (map #(format "%02x" (bit-and (int %) 0xff)) digest)))
        :cljs (throw (js/Error. "document-sha256-hex requires the JVM/Node host path")))))
 
+(defn- bytes->hex
+  "Lowercase hex of a byte array."
+  [bytes]
+  #?(:clj (let [^bytes arr bytes]
+            (apply str (map #(format "%02x" (bit-and (int %) 0xff)) arr)))
+     :cljs (apply str (map (fn [b]
+                             (let [h (.toString (bit-and b 255) 16)]
+                               (if (< (count h) 2) (str "0" h) h)))
+                           bytes))))
+
+(defn- hex->bytes!
+  "Decode a lowercase hex string into a JVM byte-array (or cljs Uint8Array)."
+  [s]
+  (when-not (string? s)
+    (throw (ex-info "document-read requires a string" {:phase :value})))
+  (let [n (count s)]
+    (when (odd? n)
+      (throw (ex-info "document-read hex length must be even"
+                      {:phase :value :length n})))
+    (when (> n 1048576)
+      (throw (ex-info "document-read hex exceeds size limit"
+                      {:phase :value :length n})))
+    (dotimes [i n]
+      (let [c #?(:clj (.charAt ^String s i) :cljs (.charAt s i))
+            ok (or (and (>= (int c) 48) (<= (int c) 57))
+                   (and (>= (int c) 97) (<= (int c) 102)))]
+        (when-not ok
+          (throw (ex-info "document-read hex must be lowercase [0-9a-f]"
+                          {:phase :value :index i})))))
+    #?(:clj
+       (let [arr (byte-array (quot n 2))]
+         (dotimes [i (quot n 2)]
+           (let [hi (Character/digit (.charAt ^String s (* 2 i)) 16)
+                 lo (Character/digit (.charAt ^String s (inc (* 2 i))) 16)]
+             (aset-byte arr i (unchecked-byte (+ (* hi 16) lo)))))
+         arr)
+       :cljs
+       (let [arr (js/Uint8Array. (quot n 2))]
+         (dotimes [i (quot n 2)]
+           (let [hi (js/parseInt (.substring s (* 2 i) (inc (* 2 i))) 16)
+                 lo (js/parseInt (.substring s (inc (* 2 i)) (+ 2 (* 2 i))) 16)]
+             (aset arr i (+ (* hi 16) lo))))
+         arr))))
+
+(defn- document-from-canonical-bytes!
+  "Inverse of document-canonical-bytes. Result still passes through
+  bounded-document! for depth/node/item/byte budgets."
+  [bytes]
+  (let [len #?(:clj (alength ^bytes bytes) :cljs (.-length bytes))
+        idx (volatile! 0)]
+    (letfn [(peek-byte []
+              (when (>= @idx len)
+                (throw (ex-info "document-read truncated encoding"
+                                {:phase :value :offset @idx})))
+              #?(:clj (bit-and (int (aget ^bytes bytes @idx)) 0xff)
+                 :cljs (aget bytes @idx)))
+            (take-byte []
+              (let [b (peek-byte)]
+                (vswap! idx inc)
+                b))
+            (take-until [sep]
+              (let [start @idx]
+                (loop []
+                  (when (>= @idx len)
+                    (throw (ex-info "document-read missing terminator"
+                                    {:phase :value :sep sep})))
+                  (if (= (peek-byte) sep)
+                    (let [end @idx]
+                      (vswap! idx inc)
+                      #?(:clj (String. ^bytes bytes start (- end start) StandardCharsets/UTF_8)
+                         :cljs (.decode (js/TextDecoder. "utf-8")
+                                        (.subarray bytes start end))))
+                    (do (vswap! idx inc) (recur))))))
+            (take-len-str []
+              (let [len-str (take-until 58) ;; ':'
+                    n (try
+                        #?(:clj (Long/parseLong len-str)
+                           :cljs (js/parseInt len-str 10))
+                        (catch #?(:clj Exception :cljs :default) _
+                          (throw (ex-info "document-read invalid length"
+                                          {:phase :value :text len-str}))))]
+                (when (or (neg? n) (> n document-utf8-byte-limit))
+                  (throw (ex-info "document-read string length out of range"
+                                  {:phase :value :length n})))
+                (when (> (+ @idx n) len)
+                  (throw (ex-info "document-read truncated string payload"
+                                  {:phase :value :need n})))
+                (let [start @idx]
+                  (vswap! idx + n)
+                  #?(:clj (String. ^bytes bytes start (int n) StandardCharsets/UTF_8)
+                     :cljs (.decode (js/TextDecoder. "utf-8")
+                                    (.subarray bytes start (+ start n)))))))
+            (parse-int-decimal [s]
+              (try
+                #?(:clj (Long/parseLong s)
+                   :cljs (js/BigInt s))
+                (catch #?(:clj Exception :cljs :default) _
+                  (throw (ex-info "document-read invalid integer"
+                                  {:phase :value :text s})))))
+            (walk []
+              (let [tag (take-byte)]
+                (case tag
+                  110 ["null"]
+                  98 (let [b (take-byte)]
+                       (cond
+                         (= b 116) ["bool" true]
+                         (= b 102) ["bool" false]
+                         :else (throw (ex-info "document-read invalid bool"
+                                               {:phase :value :byte b}))))
+                  105 ["i64" (parse-int-decimal (take-until 59))]
+                  102 (let [bits (parse-int-decimal (take-until 59))]
+                        ["f64" (i64-bits-to-f64 bits)])
+                  115 ["string" (take-len-str)]
+                  107 (let [kw-str (take-len-str)]
+                        (when-not (and (string? kw-str)
+                                       (pos? (count kw-str))
+                                       (= (first kw-str) \:))
+                          (throw (ex-info "document-read keyword must start with colon"
+                                          {:phase :value :text kw-str})))
+                        ["keyword" (keyword (subs kw-str 1))])
+                  118 (let [n (int (parse-int-decimal (take-until 58)))]
+                        (when (or (neg? n) (> n document-container-item-limit))
+                          (throw (ex-info "document-read vector count out of range"
+                                          {:phase :value :count n})))
+                        ["vector" (vec (repeatedly n walk))])
+                  109 (let [n (int (parse-int-decimal (take-until 58)))]
+                        (when (or (neg? n) (> n document-container-item-limit))
+                          (throw (ex-info "document-read map count out of range"
+                                          {:phase :value :count n})))
+                        ["map"
+                         (vec
+                          (repeatedly n
+                            (fn []
+                              (when-not (= (take-byte) 75) ;; 'K'
+                                (throw (ex-info "document-read map entry missing K"
+                                                {:phase :value})))
+                              (let [k-str (take-len-str)]
+                                (when-not (and (string? k-str)
+                                               (pos? (count k-str))
+                                               (= (first k-str) \:))
+                                  (throw (ex-info "document-read map key must be keyword"
+                                                  {:phase :value :text k-str})))
+                                [(keyword (subs k-str 1)) (walk)]))))])
+                  (throw (ex-info "document-read unknown tag"
+                                  {:phase :value :tag tag})))))]
+      (let [doc (walk)]
+        (when-not (= @idx len)
+          (throw (ex-info "document-read trailing bytes"
+                          {:phase :value :offset @idx :length len})))
+        doc))))
+
+(defn document-print
+  "Deterministic printer for logical documents: lowercase hex of
+  document-canonical-bytes. Inverse is document-read. Fails closed when the
+  hex encoding would exceed string-value-byte-limit."
+  [value]
+  (let [hex (bytes->hex (document-canonical-bytes value))]
+    (when (> (count hex) string-value-byte-limit)
+      (throw (ex-info "document-print exceeds string byte limit"
+                      {:phase :value :limit string-value-byte-limit
+                       :length (count hex)})))
+    hex))
+
+(defn document-read
+  "Reader inverse of document-print. Re-validates depth/node/item/byte budgets
+  via bounded-document! so host-supplied strings cannot smuggle oversize trees."
+  [s]
+  (when-not (string? s)
+    (throw (ex-info "document-read requires a string" {:phase :value})))
+  (when (> (count s) string-value-byte-limit)
+    (throw (ex-info "document-read string exceeds byte limit"
+                    {:phase :value :limit string-value-byte-limit})))
+  (bounded-document! (document-from-canonical-bytes! (hex->bytes! s))))
+
 (def ^:private leaf-value-types
   #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :option-i64 :result-i64
     :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
