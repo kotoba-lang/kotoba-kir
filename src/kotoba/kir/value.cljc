@@ -18,6 +18,10 @@
 ;; shape whose item type is not restricted to i64) that happen to share a
 ;; magnitude today, not one concept wearing two names.
 (def canonical-list-item-limit 16384)
+;; A collection of individually valid strings must not multiply the per-leaf
+;; bound into an unbounded host allocation. All string/keyword leaves in one
+;; canonical typed value share this aggregate UTF-8 payload budget.
+(def canonical-indirect-byte-limit 1048576)
 (def adt-depth-limit 8)
 (def adt-node-limit 64)
 (def variant-case-limit 32)
@@ -729,16 +733,26 @@
 
 (defn bounded-typed-value!
   "Validate a value under a canonical possibly-parametric type descriptor.
-  Recursive values share one fixed depth and node budget."
+  Recursive values share fixed depth, node, and aggregate indirect-byte
+  budgets."
   ([type value]
    (validate-value-type! type)
-   (bounded-typed-value! type value 0 (volatile! 0)))
+   (bounded-typed-value! type value 0 (volatile! 0) (volatile! 0)))
   ([type value depth nodes]
+   (bounded-typed-value! type value depth nodes (volatile! 0)))
+  ([type value depth nodes indirect-bytes]
    (vswap! nodes inc)
    (when (> @nodes adt-node-limit)
      (throw (ex-info "ADT value exceeds node limit" {:phase :value :limit adt-node-limit})))
    (when (> depth adt-depth-limit)
      (throw (ex-info "ADT value exceeds depth limit" {:phase :value :limit adt-depth-limit})))
+   (letfn [(charge-indirect! [bytes]
+             (vswap! indirect-bytes + bytes)
+             (when (> @indirect-bytes canonical-indirect-byte-limit)
+               (throw
+                (ex-info "canonical value exceeds aggregate indirect byte limit"
+                         {:phase :value :bytes @indirect-bytes
+                          :limit canonical-indirect-byte-limit}))))]
    (case type
      :i64 (do (when-not #?(:clj (and (integer? value) (<= Long/MIN_VALUE value Long/MAX_VALUE))
                               :cljs (and (i64/bigint-value? value) (i64/in-i64-range? value)))
@@ -747,8 +761,12 @@
                 (throw (ex-info "value is not f64" {:phase :value}))) value)
      :f32 (do (when-not (f32-value? value)
                 (throw (ex-info "value is not f32" {:phase :value}))) value)
-     :string (bounded-string! value string-value-byte-limit)
-     :keyword (bounded-keyword! value keyword-value-byte-limit)
+     :string (let [validated (bounded-string! value string-value-byte-limit)]
+               (charge-indirect! (utf8-byte-count! validated))
+               validated)
+     :keyword (let [validated (bounded-keyword! value keyword-value-byte-limit)]
+                (charge-indirect! (utf8-byte-count! (str validated)))
+                validated)
      :symbol (bounded-symbol! value symbol-value-byte-limit)
      :map (bounded-map! value)
      :bool (do (when-not (boolean? value)
@@ -766,7 +784,8 @@
          (when-not (and (vector? value) (= 2 (count value)) (boolean? (first value)))
            (throw (ex-info "value is not a parametric result" {:phase :value})))
          (let [payload-type (if (first value) (second type) (nth type 2))]
-           [(first value) (bounded-typed-value! payload-type (second value) (inc depth) nodes)]))
+           [(first value) (bounded-typed-value! payload-type (second value)
+                                                (inc depth) nodes indirect-bytes)]))
 
        (= :variant (first type))
        (do
@@ -779,7 +798,8 @@
                                   (nth type 2))]
            (when-not payload-type
              (throw (ex-info "variant case is not declared" {:phase :value :tag tag})))
-           [type tag (bounded-typed-value! payload-type (nth value 2) (inc depth) nodes)]))
+           [type tag (bounded-typed-value! payload-type (nth value 2)
+                                           (inc depth) nodes indirect-bytes)]))
 
        (= :option (first type))
        (do
@@ -789,7 +809,8 @@
            (throw (ex-info "value is not the declared generic option type" {:phase :value})))
          (if (false? (second value))
            [type false]
-           [type true (bounded-typed-value! (second type) (nth value 2) (inc depth) nodes)]))
+           [type true (bounded-typed-value! (second type) (nth value 2)
+                                            (inc depth) nodes indirect-bytes)]))
 
        (= :vector (first type))
        (let [item-types (second type)]
@@ -799,7 +820,8 @@
                            {:phase :value})))
          (into [type]
                (map (fn [item-type item]
-                      (bounded-typed-value! item-type item (inc depth) nodes))
+                      (bounded-typed-value! item-type item (inc depth)
+                                            nodes indirect-bytes))
                     item-types (rest value))))
 
        (= :list (first type))
@@ -811,7 +833,8 @@
            (throw (ex-info "value is not the declared bounded list"
                            {:phase :value :limit canonical-list-item-limit})))
          [type
-          (mapv #(bounded-typed-value! item-type % (inc depth) nodes)
+          (mapv #(bounded-typed-value! item-type % (inc depth)
+                                       nodes indirect-bytes)
                 (second value))])
 
        (= :set (first type))
@@ -821,7 +844,8 @@
                         (<= (count (second value)) typed-set-item-limit))
            (throw (ex-info "value is not the declared typed set"
                            {:phase :value :limit typed-set-item-limit})))
-         (let [items (mapv #(bounded-typed-value! item-type % (inc depth) nodes)
+         (let [items (mapv #(bounded-typed-value! item-type % (inc depth)
+                                                  nodes indirect-bytes)
                            (second value))
                sorted-items (vec (sort #(compare-typed-values item-type %1 %2) items))]
            (when (some (fn [[left right]]
@@ -840,8 +864,10 @@
            (throw (ex-info "value is not the declared typed map"
                            {:phase :value :limit typed-map-entry-limit})))
          (let [entries (mapv (fn [[key item]]
-                               [(bounded-typed-value! key-type key (inc depth) nodes)
-                                (bounded-typed-value! value-type item (inc depth) nodes)])
+                               [(bounded-typed-value! key-type key (inc depth)
+                                                      nodes indirect-bytes)
+                                (bounded-typed-value! value-type item (inc depth)
+                                                      nodes indirect-bytes)])
                              (second value))
                sorted-entries (vec (sort #(compare-typed-values key-type
                                                                  (first %1) (first %2))
@@ -859,7 +885,9 @@
            (throw (ex-info "value is not the declared record type" {:phase :value})))
          (into [type]
                (map (fn [[_ field-type] field-value]
-                      (bounded-typed-value! field-type field-value (inc depth) nodes))
+                      (bounded-typed-value! field-type field-value (inc depth)
+                                            nodes indirect-bytes))
                     fields (rest value))))
 
-       :else (throw (ex-info "value type is outside the safe profile" {:phase :value}))))))
+       :else (throw (ex-info "value type is outside the safe profile"
+                             {:phase :value})))))))
