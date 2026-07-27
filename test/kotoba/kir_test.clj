@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [kotoba.kir]
             [kotoba.kir.value]
-            [kotoba.kir.target]
+            [kotoba.kir.target :as target]
             [kotoba.kir.decimal]
             [kotoba.kir.xml]
             [kotoba.kir.compatibility]
@@ -18,3 +18,12 @@
   (is (some? (find-ns 'kotoba.kir.xml)) "kotoba.kir.xml must load")
   (is (some? (find-ns 'kotoba.kir.compatibility)) "kotoba.kir.compatibility must load")
   (is (some? (find-ns 'kotoba.kir.admission)) "kotoba.kir.admission must load"))
+
+(deftest typed-component-target-is-a-non-ambient-component
+  (is (= {:execution :component
+          :abi :component-canonical-abi-v2
+          :runtime :kotoba-component-runtime-v2
+          :wasi-version "0.3.0"
+          :ambient-wasi false}
+         (select-keys (target/profile :wasm-component-kotoba-v2)
+                      [:execution :abi :runtime :wasi-version :ambient-wasi]))))
