@@ -125,6 +125,19 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (value/bounded-typed-value! type invalid))))))
 
+(deftest canonical-indirect-bytes-are-bounded-across-list-items
+  (let [type [:list :string]
+        leaf (apply str (repeat value/string-value-byte-limit "a"))
+        at-limit [type (vec (repeat 16 leaf))]
+        over-limit [type (vec (repeat 17 leaf))]]
+    (is (= value/canonical-indirect-byte-limit
+           (* 16 value/string-value-byte-limit)))
+    (is (= at-limit (value/bounded-typed-value! type at-limit)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"aggregate indirect byte limit"
+         (value/bounded-typed-value! type over-limit)))))
+
 (deftest typed-set-values-are-unique-canonically-ordered-and-bounded
   (let [type [:set :i64]
         option-type [:option :string]
