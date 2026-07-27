@@ -1,5 +1,7 @@
 (ns kotoba.kir.value
-  #?(:cljs (:require [kotoba.kir.cljs-i64 :as i64])))
+  #?(:clj (:import [java.nio.charset StandardCharsets]
+                   [java.security MessageDigest])
+     :cljs (:require [kotoba.kir.cljs-i64 :as i64])))
 
 (def string-literal-byte-limit 4096)
 (def string-value-byte-limit 65536)
@@ -553,6 +555,85 @@
                         [tag (mapv (fn [[key item]] [key (walk item (inc depth))]) payload)]))
                   (throw (ex-info "unknown document tag" {:phase :value :tag tag})))))]
       (walk value 0))))
+
+(defn- utf8-bytes
+  "UTF-8 byte sequence for S as a seq of 0-255 ints."
+  [s]
+  #?(:clj (map #(bit-and (int %) 0xff) (.getBytes ^String s StandardCharsets/UTF_8))
+     :cljs (js->clj (.encode (js/TextEncoder.) s))))
+
+(defn- normalize-document-f64 [value]
+  ;; Match document-equal? identity for signed zero.
+  (if (zero? value) 0.0 value))
+
+(defn document-canonical-bytes
+  "Deterministic UTF-8 identity encoding of a validated document. Format:
+  n | b t/f | i <decimal> ; | f <i64-bits-decimal> ; |
+  s <utf8-len> : <bytes> | k <utf8-len> : <keyword-str-with-colon-bytes> |
+  v <count> : <items...> | m <count> : (K <key-len> : <key-bytes> <item>)*
+
+  Keywords (values and map keys) use the full `str` form including the leading
+  colon (e.g. \":tag\"). Map keys are tagged with capital K to distinguish them
+  from keyword values (lowercase k). Map order is the already-canonical sorted
+  order from bounded-document!."
+  [value]
+  (let [doc (bounded-document! value)
+        out #?(:clj (java.util.ArrayList.)
+               :cljs (array))]
+    (letfn [(emit [n]
+              #?(:clj (.add out (int n))
+                 :cljs (.push out n)))
+            (emit-str [s]
+              (doseq [b (utf8-bytes s)] (emit b)))
+            (emit-len-str [s]
+              (let [bs (utf8-bytes s)]
+                (emit-str (str (count bs)))
+                (emit (int \:))
+                (doseq [b bs] (emit b))))
+            (walk [node]
+              (let [tag (first node)]
+                (case tag
+                  "null" (emit (int \n))
+                  "bool" (do (emit (int \b))
+                             (emit (if (second node) (int \t) (int \f))))
+                  "i64" (do (emit (int \i))
+                            (emit-str (str (second node)))
+                            (emit (int \;)))
+                  "f64" (do (emit (int \f))
+                            (emit-str (str (f64-to-i64-bits (normalize-document-f64 (second node)))))
+                            (emit (int \;)))
+                  "string" (do (emit (int \s))
+                               (emit-len-str (second node)))
+                  "keyword" (do (emit (int \k))
+                                (emit-len-str (str (second node))))
+                  "vector" (do (emit (int \v))
+                               (emit-str (str (count (second node))))
+                               (emit (int \:))
+                               (doseq [item (second node)] (walk item)))
+                  "map" (do (emit (int \m))
+                            (emit-str (str (count (second node))))
+                            (emit (int \:))
+                            (doseq [[k item] (second node)]
+                              (emit (int \K))
+                              (emit-len-str (str k))
+                              (walk item)))
+                  (throw (ex-info "unknown document tag in canonical encoding"
+                                  {:phase :value :tag tag})))))]
+      (walk doc)
+      #?(:clj (let [arr (byte-array (.size out))]
+                (dotimes [i (.size out)]
+                  (aset-byte arr i (unchecked-byte (.get out i))))
+                arr)
+         :cljs (js/Uint8Array.from out)))))
+
+(defn document-sha256-hex
+  "SHA-256 hex digest of document-canonical-bytes. Host-independent identity
+  for logical documents (W4 exit gate)."
+  [value]
+  (let [bytes (document-canonical-bytes value)]
+    #?(:clj (let [digest (.digest (MessageDigest/getInstance "SHA-256") ^bytes bytes)]
+              (apply str (map #(format "%02x" (bit-and (int %) 0xff)) digest)))
+       :cljs (throw (js/Error. "document-sha256-hex requires the JVM/Node host path")))))
 
 (def ^:private leaf-value-types
   #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :option-i64 :result-i64
