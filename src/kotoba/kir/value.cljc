@@ -18,6 +18,10 @@
 ;; shape whose item type is not restricted to i64) that happen to share a
 ;; magnitude today, not one concept wearing two names.
 (def canonical-list-item-limit 16384)
+;; Shared across every nested `[:list ...]` node in one value graph. Keeping
+;; this equal to the flat per-list ceiling preserves existing flat-list
+;; capacity while preventing list-of-list cardinalities from multiplying.
+(def canonical-list-total-item-limit 16384)
 ;; A collection of individually valid strings must not multiply the per-leaf
 ;; bound into an unbounded host allocation. All string/keyword leaves in one
 ;; canonical typed value share this aggregate UTF-8 payload budget.
@@ -737,10 +741,14 @@
   budgets."
   ([type value]
    (validate-value-type! type)
-   (bounded-typed-value! type value 0 (volatile! 0) (volatile! 0)))
+   (bounded-typed-value! type value 0 (volatile! 0)
+                         (volatile! 0) (volatile! 0)))
   ([type value depth nodes]
-   (bounded-typed-value! type value depth nodes (volatile! 0)))
+   (bounded-typed-value! type value depth nodes
+                         (volatile! 0) (volatile! 0)))
   ([type value depth nodes indirect-bytes]
+   (bounded-typed-value! type value depth nodes indirect-bytes (volatile! 0)))
+  ([type value depth nodes indirect-bytes list-items]
    (vswap! nodes inc)
    (when (> @nodes adt-node-limit)
      (throw (ex-info "ADT value exceeds node limit" {:phase :value :limit adt-node-limit})))
@@ -785,7 +793,8 @@
            (throw (ex-info "value is not a parametric result" {:phase :value})))
          (let [payload-type (if (first value) (second type) (nth type 2))]
            [(first value) (bounded-typed-value! payload-type (second value)
-                                                (inc depth) nodes indirect-bytes)]))
+                                                (inc depth) nodes indirect-bytes
+                                                list-items)]))
 
        (= :variant (first type))
        (do
@@ -799,7 +808,8 @@
            (when-not payload-type
              (throw (ex-info "variant case is not declared" {:phase :value :tag tag})))
            [type tag (bounded-typed-value! payload-type (nth value 2)
-                                           (inc depth) nodes indirect-bytes)]))
+                                           (inc depth) nodes indirect-bytes
+                                           list-items)]))
 
        (= :option (first type))
        (do
@@ -810,7 +820,8 @@
          (if (false? (second value))
            [type false]
            [type true (bounded-typed-value! (second type) (nth value 2)
-                                            (inc depth) nodes indirect-bytes)]))
+                                            (inc depth) nodes indirect-bytes
+                                            list-items)]))
 
        (= :vector (first type))
        (let [item-types (second type)]
@@ -821,7 +832,7 @@
          (into [type]
                (map (fn [item-type item]
                       (bounded-typed-value! item-type item (inc depth)
-                                            nodes indirect-bytes))
+                                            nodes indirect-bytes list-items))
                     item-types (rest value))))
 
        (= :list (first type))
@@ -832,9 +843,15 @@
                         (<= (count (second value)) canonical-list-item-limit))
            (throw (ex-info "value is not the declared bounded list"
                            {:phase :value :limit canonical-list-item-limit})))
+         (vswap! list-items + (count (second value)))
+         (when (> @list-items canonical-list-total-item-limit)
+           (throw
+            (ex-info "canonical value exceeds aggregate list item limit"
+                     {:phase :value :items @list-items
+                      :limit canonical-list-total-item-limit})))
          [type
           (mapv #(bounded-typed-value! item-type % (inc depth)
-                                       nodes indirect-bytes)
+                                       nodes indirect-bytes list-items)
                 (second value))])
 
        (= :set (first type))
@@ -845,7 +862,7 @@
            (throw (ex-info "value is not the declared typed set"
                            {:phase :value :limit typed-set-item-limit})))
          (let [items (mapv #(bounded-typed-value! item-type % (inc depth)
-                                                  nodes indirect-bytes)
+                                                  nodes indirect-bytes list-items)
                            (second value))
                sorted-items (vec (sort #(compare-typed-values item-type %1 %2) items))]
            (when (some (fn [[left right]]
@@ -865,9 +882,9 @@
                            {:phase :value :limit typed-map-entry-limit})))
          (let [entries (mapv (fn [[key item]]
                                [(bounded-typed-value! key-type key (inc depth)
-                                                      nodes indirect-bytes)
+                                                      nodes indirect-bytes list-items)
                                 (bounded-typed-value! value-type item (inc depth)
-                                                      nodes indirect-bytes)])
+                                                      nodes indirect-bytes list-items)])
                              (second value))
                sorted-entries (vec (sort #(compare-typed-values key-type
                                                                  (first %1) (first %2))
@@ -886,7 +903,7 @@
          (into [type]
                (map (fn [[_ field-type] field-value]
                       (bounded-typed-value! field-type field-value (inc depth)
-                                            nodes indirect-bytes))
+                                            nodes indirect-bytes list-items))
                     fields (rest value))))
 
        :else (throw (ex-info "value type is outside the safe profile"
