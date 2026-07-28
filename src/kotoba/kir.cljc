@@ -2279,21 +2279,12 @@
                                                  typed-values? (conj :param-types)))
                                (:functions hir))}
         ;; Effectful results require host authority and cannot be constant-oracled.
-        ;; Deep pure loops (T7.4) need oracle-fuel; if the host stack or budget
-        ;; still cannot finish, leave oracle-value nil (fail-open for folding only —
-        ;; runtime execute remains the dual-backend truth).
+        ;; Deep pure loops (T7.4) need oracle-fuel; loop-helper trampoline keeps
+        ;; host stack flat so 10k finishes. Unbounded non-helper recursion still
+        ;; traps (fuel or host-stack) and aborts lower — intentional.
         value (when (and (:entry hir) (= :i64 (:result hir))
                          (empty? (:effects hir)) (not kernel-native?))
-                (try
-                  (execute base (:entry hir) [] {:fuel oracle-fuel})
-                  (catch #?(:clj Throwable :cljs :default) e
-                    (let [d (ex-data e)]
-                      (if (or (= :fuel-exhausted (:trap d))
-                              (:host-stack-exhausted d)
-                              #?(:clj (instance? StackOverflowError e)
-                                 :cljs false))
-                        nil
-                        (throw e))))))]
+                (execute base (:entry hir) [] {:fuel oracle-fuel}))]
     (assoc base
            :oracle-value value
            :blocks (if (some? value)
