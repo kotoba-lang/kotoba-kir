@@ -1010,6 +1010,20 @@
                      (eval-expr (first args) env functions fuel heap call-stack cap-call))]
           #?(:clj (long bytes) :cljs (i64/->bigint bytes)))
 
+        ;; Product Value ABI v1: string-length is an alias of UTF-8 byte length
+        ;; (indices for string-substring are also UTF-8 byte offsets).
+        (= op 'string-length)
+        (let [bytes (value/utf8-byte-count!
+                     (eval-expr (first args) env functions fuel heap call-stack cap-call))]
+          #?(:clj (long bytes) :cljs (i64/->bigint bytes)))
+
+        ;; Decimal string of a signed i64 (kills hand-written digit recursion in pure oracles).
+        (= op 'string-from-i64)
+        (let [n (eval-expr (first args) env functions fuel heap call-stack cap-call)
+              text #?(:clj (Long/toString (long n))
+                      :cljs (.toString ^js n))]
+          (value/bounded-string! text value/string-value-byte-limit))
+
         ;; Guest poll (ADR 0127): 1 if ready, 0 if pending; cancelled traps.
         (= op 'task-ready?)
         (let [task (eval-expr (first args) env functions fuel heap call-stack cap-call)
