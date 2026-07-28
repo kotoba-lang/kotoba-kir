@@ -1024,7 +1024,8 @@
             (trap! :task-state-unknown {:state (:state polled)})))
 
         ;; Guest poll+read aggregate (ADR 0127): require ready task, drain the
-        ;; stream, return total bytes. Pending/cancelled/open-pending fail closed.
+        ;; stream, return total bytes, then linear-drop the task (ADR 0133).
+        ;; Pending/cancelled/open-pending fail closed.
         (= op 'bytes-task-byte-count)
         (let [task (eval-expr (first args) env functions fuel heap call-stack cap-call)
               polled (try
@@ -1046,6 +1047,10 @@
                       (if (:done? chunk)
                         n
                         (recur n)))))]
+            (try
+              (value/task-drop! task)
+              (catch #?(:clj Exception :cljs :default) error
+                (trap! :task-drop-failed {:message (ex-message error)})))
             #?(:clj (long total) :cljs (i64/->bigint total))))
 
         (= op 'string=?)
