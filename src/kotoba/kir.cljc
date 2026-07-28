@@ -370,14 +370,20 @@
 (defn- trap! [reason data]
   (throw (ex-info (name reason) (merge {:phase :ir :trap reason} data))))
 
-(defn- charge! [fuel]
-  ;; `fuel`/`remaining` are interpreter-internal bookkeeping (a plain
-  ;; counter), never a `.kotoba` VALUE, so this stays plain-number on both
-  ;; runtimes -- no bigint coercion needed here or anywhere else fuel is
-  ;; touched.
-  (let [remaining (vswap! fuel dec)]
-    (when (neg? remaining)
-      (trap! :fuel-exhausted {:limit default-fuel}))))
+(defn- charge!
+  "Decrement fuel. Optional `context` map is merged into :fuel-exhausted traps
+  (T3.3: :function + :call-stack tip for source mapping)."
+  ([fuel] (charge! fuel nil))
+  ([fuel context]
+   ;; `fuel`/`remaining` are interpreter-internal bookkeeping (a plain
+   ;; counter), never a `.kotoba` VALUE, so this stays plain-number on both
+   ;; runtimes -- no bigint coercion needed here or anywhere else fuel is
+   ;; touched.
+   (let [remaining (vswap! fuel dec)]
+     (when (neg? remaining)
+       (trap! :fuel-exhausted
+              (merge {:limit default-fuel}
+                     (when (map? context) context)))))))
 
 (defn- f64-divide [left right]
   #?(:clj (let [^double left left ^double right right] (/ left right))
@@ -820,11 +826,14 @@
       (validate-runtime-value! runtime-value type {:function (:name function)
                                                    :parameter parameter})))
   ;; Backends charge once on function entry, not once per expression.
-  (charge! fuel)
-  (let [result (eval-expr (:body function) (zipmap (:params function) values) functions
-                          fuel heap (conj call-stack (:name function)) cap-call)]
-    (validate-runtime-value! result (or (:result function) :i64)
-                             {:function (:name function) :result true})))
+  (let [stack' (conj call-stack (:name function))]
+    (charge! fuel {:function (:name function)
+                   :call-stack (vec (take-last 8 stack'))
+                   :hint "export or loop-helper name; approximate form not tracked"})
+    (let [result (eval-expr (:body function) (zipmap (:params function) values) functions
+                            fuel heap stack' cap-call)]
+      (validate-runtime-value! result (or (:result function) :i64)
+                               {:function (:name function) :result true}))))
 
 (defn- allocate-pair! [heap left right]
   (let [{:keys [cells capacity]} heap
