@@ -13,6 +13,10 @@
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
 
 (def ^:private default-fuel 512)
+;; Compile-time constant oracle may need more budget than the historical
+;; runtime default (T7.2 / T7.4 deep loop). Runtime `execute` still defaults
+;; to `default-fuel` (512) unless the caller passes `:fuel`.
+(def ^:private oracle-fuel 100000)
 (def ^:private default-pair-capacity 4096)
 (def ^:private default-kgraph-capacity 4096)
 (def ^:dynamic *runtime-schemas* nil)
@@ -813,27 +817,58 @@
 
 (declare eval-expr)
 
+;; T7.4: self-tail calls on frontend-synthesized `__kotoba_loop_N` helpers
+;; trampoline in the KIR interpreter so 10k+ iterations do not blow the host
+;; JVM stack. Fuel still charges 1 unit per helper entry (T7.2); machine TCO
+;; / zero-charge recur remains a separate claim.
+(def ^:private trampoline-tag ::trampoline)
+
+(defn- loop-helper-name?
+  "True for sequential loop-helper names emitted by the frontend desugar."
+  [sym]
+  (and (symbol? sym)
+       (nil? (namespace sym))
+       (boolean (re-matches #"__kotoba_loop_\d+" (name sym)))))
+
+(defn- trampoline-call [fname values]
+  {trampoline-tag true :function fname :values values})
+
+(defn- trampoline-call? [x]
+  (and (map? x) (true? (get x trampoline-tag))))
+
 (defn- invoke-function [function values functions fuel heap call-stack cap-call]
   (when-not function
     (trap! :unknown-function {}))
-  (when-not (= (count (:params function)) (count values))
-    (trap! :arity-mismatch {:function (:name function)
-                            :expected (count (:params function))
-                            :actual (count values)}))
-  (let [param-types (or (:param-types function)
-                        (vec (repeat (count (:params function)) :i64)))]
-    (doseq [[parameter runtime-value type] (map vector (:params function) values param-types)]
-      (validate-runtime-value! runtime-value type {:function (:name function)
-                                                   :parameter parameter})))
-  ;; Backends charge once on function entry, not once per expression.
-  (let [stack' (conj call-stack (:name function))]
-    (charge! fuel {:function (:name function)
-                   :call-stack (vec (take-last 8 stack'))
-                   :hint "export or loop-helper name; approximate form not tracked"})
-    (let [result (eval-expr (:body function) (zipmap (:params function) values) functions
-                            fuel heap stack' cap-call)]
-      (validate-runtime-value! result (or (:result function) :i64)
-                               {:function (:name function) :result true}))))
+  (loop [function function
+         values values
+         stack call-stack]
+    (when-not (= (count (:params function)) (count values))
+      (trap! :arity-mismatch {:function (:name function)
+                              :expected (count (:params function))
+                              :actual (count values)}))
+    (let [param-types (or (:param-types function)
+                          (vec (repeat (count (:params function)) :i64)))
+          fname (:name function)]
+      (doseq [[parameter runtime-value type] (map vector (:params function) values param-types)]
+        (validate-runtime-value! runtime-value type {:function fname
+                                                     :parameter parameter}))
+      ;; Backends charge once on function entry, not once per expression.
+      (let [stack' (conj stack fname)]
+        (charge! fuel {:function fname
+                       :call-stack (vec (take-last 8 stack'))
+                       :hint "export or loop-helper name; approximate form not tracked"})
+        (let [result (eval-expr (:body function) (zipmap (:params function) values) functions
+                                fuel heap stack' cap-call)]
+          (if (trampoline-call? result)
+            (let [next-name (:function result)
+                  next-fn (get functions next-name)]
+              (when-not next-fn
+                (trap! :unknown-function {:function next-name}))
+              ;; Self-tail on the same helper keeps stack tip (no host growth).
+              (recur next-fn (:values result)
+                     (if (= next-name fname) stack stack')))
+            (validate-runtime-value! result (or (:result function) :i64)
+                                     {:function fname :result true})))))))
 
 (defn- allocate-pair! [heap left right]
   (let [{:keys [cells capacity]} heap
@@ -2126,8 +2161,16 @@
             xorshift32 (xorshift32 (first xs))))
 
         :else
-        (let [values (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
-          (invoke-function (get functions op) values functions fuel heap call-stack cap-call))))))
+        (let [values (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)
+              ;; Self-tail trampoline for `__kotoba_loop_N` (T7.4): when the
+              ;; call target is the current stack tip and that tip is a
+              ;; synthesized loop helper, return a trampoline marker instead of
+              ;; nesting another JVM frame. Non-helper mutual recursion still
+              ;; uses ordinary invoke-function.
+              tip (peek call-stack)]
+          (if (and (loop-helper-name? op) (= op tip))
+            (trampoline-call op values)
+            (invoke-function (get functions op) values functions fuel heap call-stack cap-call)))))))
 
 (defn execute
   "Executes one KIR export using normative typed-value semantics. i64 math
@@ -2236,9 +2279,21 @@
                                                  typed-values? (conj :param-types)))
                                (:functions hir))}
         ;; Effectful results require host authority and cannot be constant-oracled.
+        ;; Deep pure loops (T7.4) need oracle-fuel; if the host stack or budget
+        ;; still cannot finish, leave oracle-value nil (fail-open for folding only —
+        ;; runtime execute remains the dual-backend truth).
         value (when (and (:entry hir) (= :i64 (:result hir))
                          (empty? (:effects hir)) (not kernel-native?))
-                (execute base (:entry hir) []))]
+                (try
+                  (execute base (:entry hir) [] {:fuel oracle-fuel})
+                  (catch #?(:clj Throwable :cljs :default) e
+                    (let [d (ex-data e)]
+                      (if (or (= :fuel-exhausted (:trap d))
+                              (:host-stack-exhausted d)
+                              #?(:clj (instance? StackOverflowError e)
+                                 :cljs false))
+                        nil
+                        (throw e))))))]
     (assoc base
            :oracle-value value
            :blocks (if (some? value)
