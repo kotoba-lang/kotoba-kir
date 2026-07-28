@@ -285,6 +285,110 @@
   #?(:clj (.getBytes ^String s StandardCharsets/UTF_8)
      :cljs (.encode (js/TextEncoder.) s)))
 
+
+(def ^:private handle-seq (atom 0))
+
+(defn- next-handle-id!
+  []
+  (swap! handle-seq inc))
+
+(defn stream-value?
+  "Host affine handle for [:stream :bytes]."
+  [value]
+  (and (map? value)
+       (contains? value :kotoba.stream/id)
+       (= :bytes (:kotoba.stream/item-type value))
+       (bytes-value? (:kotoba.stream/payload value))
+       (some? (:kotoba.stream/state value))))
+
+(defn task-value?
+  "Host affine handle for [:task [:stream :bytes]]."
+  [value]
+  (and (map? value)
+       (contains? value :kotoba.task/id)
+       (= [:stream :bytes] (:kotoba.task/result-type value))
+       (contains? #{:pending :ready :cancelled} (:kotoba.task/state value))
+       (let [s (:kotoba.task/stream value)]
+         (or (nil? s) (stream-value? s)))))
+
+(defn make-bytes-stream
+  "Construct a host [:stream :bytes] value over a single payload chunk."
+  [payload]
+  (let [payload (bounded-bytes! payload)]
+    {:kotoba.stream/id (next-handle-id!)
+     :kotoba.stream/item-type :bytes
+     :kotoba.stream/payload payload
+     :kotoba.stream/state (atom {:offset 0 :cancelled? false})}))
+
+(defn make-ready-bytes-task
+  "Construct a host [:task [:stream :bytes]] already :ready with one stream."
+  [payload]
+  {:kotoba.task/id (next-handle-id!)
+   :kotoba.task/result-type [:stream :bytes]
+   :kotoba.task/state :ready
+   :kotoba.task/stream (make-bytes-stream payload)})
+
+(defn make-pending-bytes-task
+  "Construct a host bytes-task still :pending (no stream yet)."
+  []
+  {:kotoba.task/id (next-handle-id!)
+   :kotoba.task/result-type [:stream :bytes]
+   :kotoba.task/state :pending
+   :kotoba.task/stream nil})
+
+(defn task-poll
+  "Poll a bytes-task. Returns {:state :ready|:pending|:cancelled :stream s?}."
+  [task]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (case (:kotoba.task/state task)
+    :ready {:state :ready :stream (:kotoba.task/stream task)}
+    :pending {:state :pending}
+    :cancelled {:state :cancelled}))
+
+(defn task-cancel!
+  "Return a cancelled copy of the task."
+  [task]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (assoc task :kotoba.task/state :cancelled))
+
+(defn stream-cancel!
+  "Cancel a bytes-stream. Subsequent reads fail closed."
+  [stream]
+  (when-not (stream-value? stream)
+    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (swap! (:kotoba.stream/state stream) assoc :cancelled? true)
+  stream)
+
+(defn stream-read!
+  "Pull up to max-bytes from a bytes-stream. Returns {:bytes <bytes> :done? bool}."
+  [stream max-bytes]
+  (when-not (stream-value? stream)
+    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (when-not (and (integer? max-bytes) (pos? max-bytes)
+                 (<= max-bytes bytes-value-byte-limit))
+    (throw (ex-info "stream-read max-bytes out of range"
+                    {:phase :value :max-bytes max-bytes})))
+  (let [st (:kotoba.stream/state stream)
+        payload (:kotoba.stream/payload stream)
+        total (bytes-byte-count payload)]
+    (when (:cancelled? @st)
+      (throw (ex-info "bytes-stream is cancelled" {:phase :value})))
+    (let [offset (:offset @st)
+          remain (- total offset)]
+      (if (<= remain 0)
+        {:bytes #?(:clj (byte-array 0) :cljs (js/Uint8Array. 0))
+         :done? true}
+        (let [n (min remain max-bytes)
+              chunk #?(:clj (java.util.Arrays/copyOfRange ^bytes payload (int offset) (int (+ offset n)))
+                       :cljs (.slice payload offset (+ offset n)))
+              next-offset (+ offset n)
+              done? (>= next-offset total)]
+          (swap! st assoc :offset next-offset)
+          {:bytes chunk :done? done?})))))
+
+
 (defn utf8-substring!
   "Checked UTF-8 byte-offset substring. Both offsets must be code-point
   boundaries; malformed UTF-16 is rejected by utf8-byte-count! first."
@@ -931,6 +1035,19 @@
        (doseq [[_ payload-type] cases]
          (validate-value-type! payload-type (inc depth) nodes))
        type)
+     (and (vector? type) (= 2 (count type)) (= :stream (first type)))
+     (do (when-not (= :bytes (second type))
+           (throw (ex-info "stream item type must be :bytes in this profile"
+                           {:phase :value :type type})))
+         (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (and (vector? type) (= 2 (count type)) (= :task (first type)))
+     (do (let [inner (second type)]
+           (when-not (and (vector? inner) (= :stream (first inner)))
+             (throw (ex-info "task result type must be [:stream :bytes] in this profile"
+                             {:phase :value :type type})))
+           (validate-value-type! inner (inc depth) nodes))
+         type)
      :else (throw (ex-info "value type is outside the safe profile"
                            {:phase :value :type type})))))
 
@@ -1247,6 +1364,28 @@
                       (bounded-typed-value! field-type field-value (inc depth)
                                             nodes indirect-bytes list-items))
                     fields (rest value))))
+
+       (= :stream (first type))
+       (do
+         (when-not (and (= 2 (count type)) (= :bytes (second type)))
+           (throw (ex-info "stream type must be [:stream :bytes]" {:phase :value})))
+         (when-not (stream-value? value)
+           (throw (ex-info "value is not a bytes-stream handle" {:phase :value})))
+         (bounded-bytes! (:kotoba.stream/payload value) bytes-value-byte-limit)
+         (charge-indirect! (bytes-byte-count (:kotoba.stream/payload value)))
+         value)
+
+       (= :task (first type))
+       (do
+         (when-not (and (= 2 (count type))
+                        (= [:stream :bytes] (second type)))
+           (throw (ex-info "task type must be [:task [:stream :bytes]]" {:phase :value})))
+         (when-not (task-value? value)
+           (throw (ex-info "value is not a bytes-task handle" {:phase :value})))
+         (when-let [s (:kotoba.task/stream value)]
+           (bounded-typed-value! [:stream :bytes] s (inc depth)
+                                 nodes indirect-bytes list-items))
+         value)
 
        (schema-ref-type? type)
        (bounded-typed-value! (resolve-schema-ref-type type value) value
