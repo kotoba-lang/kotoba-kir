@@ -44,7 +44,7 @@
 ;; instead of rejecting cleanly -- so admission has to inspect which
 ;; features are actually used, not just the HIR format tag.
 (def non-string-typed-ops
-  '#{string-replace-all string-contains? string-fold-case
+  '#{string-replace-all string-contains? string-split-count string-fold-case
      f32-to-bits f32-from-bits f64-to-f32-rounded f32-to-f64-exact
      f32-add f32-sub f32-mul f32-div f32-min f32-max f32-neg f32-abs f32-sqrt
      f32-eq f32-lt f32-le f32-gt f32-ge f32-unordered
@@ -1144,6 +1144,22 @@
           (when (empty? needle) (trap! :empty-string-search-needle {}))
           #?(:clj (if (str/includes? haystack needle) 1 0)
              :cljs (if (str/includes? haystack needle) i64/one i64/zero)))
+
+        ;; T4.2: number of segments when splitting haystack by non-empty sep
+        ;; (non-overlapping). Empty separator traps. Matches JS split length
+        ;; for non-regex separators (e.g. "" / "," → 1, "a,b" / "," → 2).
+        (= op 'string-split-count)
+        (let [[haystack sep]
+              (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
+          (when (empty? sep) (trap! :empty-string-split-separator {}))
+          (let [sep-len #?(:clj (count sep) :cljs (.-length sep))
+                n (loop [i 0 acc 1]
+                    (let [idx #?(:clj (.indexOf ^String haystack ^String sep i)
+                                 :cljs (.indexOf haystack sep i))]
+                      (if (neg? idx)
+                        acc
+                        (recur (+ idx sep-len) (inc acc)))))]
+            #?(:clj (long n) :cljs (i64/->bigint n))))
 
         (= op 'string-fold-case)
         (value/bounded-string!
