@@ -1010,6 +1010,44 @@
                      (eval-expr (first args) env functions fuel heap call-stack cap-call))]
           #?(:clj (long bytes) :cljs (i64/->bigint bytes)))
 
+        ;; Guest poll (ADR 0127): 1 if ready, 0 if pending; cancelled traps.
+        (= op 'task-ready?)
+        (let [task (eval-expr (first args) env functions fuel heap call-stack cap-call)
+              polled (try
+                       (value/task-poll task)
+                       (catch #?(:clj Exception :cljs :default) error
+                         (trap! :not-a-bytes-task {:message (ex-message error)})))]
+          (case (:state polled)
+            :ready #?(:clj 1 :cljs i64/one)
+            :pending #?(:clj 0 :cljs i64/zero)
+            :cancelled (trap! :task-cancelled {})
+            (trap! :task-state-unknown {:state (:state polled)})))
+
+        ;; Guest poll+read aggregate (ADR 0127): require ready task, drain the
+        ;; stream, return total bytes. Pending/cancelled/open-pending fail closed.
+        (= op 'bytes-task-byte-count)
+        (let [task (eval-expr (first args) env functions fuel heap call-stack cap-call)
+              polled (try
+                       (value/task-poll task)
+                       (catch #?(:clj Exception :cljs :default) error
+                         (trap! :not-a-bytes-task {:message (ex-message error)})))]
+          (when-not (= :ready (:state polled))
+            (trap! :task-not-ready {:state (:state polled)}))
+          (let [stream (:stream polled)
+                total
+                (loop [acc 0]
+                  (let [chunk (try
+                                (value/stream-read! stream value/bytes-value-byte-limit)
+                                (catch #?(:clj Exception :cljs :default) error
+                                  (trap! :stream-read-failed {:message (ex-message error)})))]
+                    (when (true? (:pending? chunk))
+                      (trap! :stream-pending {:message "open stream has no chunk yet"}))
+                    (let [n (+ acc (value/bytes-byte-count (:bytes chunk)))]
+                      (if (:done? chunk)
+                        n
+                        (recur n)))))]
+            #?(:clj (long total) :cljs (i64/->bigint total))))
+
         (= op 'string=?)
         (let [[left right] (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           #?(:clj (if (= left right) 1 0)
