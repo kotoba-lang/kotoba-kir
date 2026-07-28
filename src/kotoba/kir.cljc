@@ -817,10 +817,11 @@
 
 (declare eval-expr)
 
-;; T7.4: self-tail calls on frontend-synthesized `__kotoba_loop_N` helpers
-;; trampoline in the KIR interpreter so 10k+ iterations do not blow the host
-;; JVM stack. Fuel still charges 1 unit per helper entry (T7.2); machine TCO
-;; / zero-charge recur remains a separate claim.
+;; T7.4 / T7.1: self-tail calls on frontend-synthesized `__kotoba_loop_N`
+;; helpers trampoline in the KIR interpreter so 10k+ iterations do not blow
+;; the host JVM stack. T7.1: **zero-charge** on trampoline re-entry of the
+;; same loop helper (first entry still charges 1 unit per T7.2). Hosts must
+;; still wall-clock-bound adversarial infinite loops.
 (def ^:private trampoline-tag ::trampoline)
 
 (defn- loop-helper-name?
@@ -841,7 +842,8 @@
     (trap! :unknown-function {}))
   (loop [function function
          values values
-         stack call-stack]
+         stack call-stack
+         charge? true]
     (when-not (= (count (:params function)) (count values))
       (trap! :arity-mismatch {:function (:name function)
                               :expected (count (:params function))
@@ -852,21 +854,25 @@
       (doseq [[parameter runtime-value type] (map vector (:params function) values param-types)]
         (validate-runtime-value! runtime-value type {:function fname
                                                      :parameter parameter}))
-      ;; Backends charge once on function entry, not once per expression.
+      ;; Charge once on first entry; loop-helper self-tail re-entries are free (T7.1).
       (let [stack' (conj stack fname)]
-        (charge! fuel {:function fname
-                       :call-stack (vec (take-last 8 stack'))
-                       :hint "export or loop-helper name; approximate form not tracked"})
+        (when charge?
+          (charge! fuel {:function fname
+                         :call-stack (vec (take-last 8 stack'))
+                         :hint "export or loop-helper name; approximate form not tracked"}))
         (let [result (eval-expr (:body function) (zipmap (:params function) values) functions
                                 fuel heap stack' cap-call)]
           (if (trampoline-call? result)
             (let [next-name (:function result)
-                  next-fn (get functions next-name)]
+                  next-fn (get functions next-name)
+                  self-loop? (and (loop-helper-name? next-name) (= next-name fname))]
               (when-not next-fn
                 (trap! :unknown-function {:function next-name}))
-              ;; Self-tail on the same helper keeps stack tip (no host growth).
+              ;; Self-tail on the same helper keeps stack tip (no host growth)
+              ;; and skips fuel charge (zero-charge recur for desugared loop).
               (recur next-fn (:values result)
-                     (if (= next-name fname) stack stack')))
+                     (if self-loop? stack stack')
+                     (not self-loop?)))
             (validate-runtime-value! result (or (:result function) :i64)
                                      {:function fname :result true})))))))
 
