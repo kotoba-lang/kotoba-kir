@@ -320,6 +320,42 @@
      :kotoba.stream/payload payload
      :kotoba.stream/state (atom {:offset 0 :cancelled? false})}))
 
+(defn concat-bytes
+  "Concatenate a sequence of host :bytes values into one bounded payload."
+  [chunks]
+  (when-not (and (sequential? chunks) (seq chunks))
+    (throw (ex-info "concat-bytes requires a non-empty sequence of bytes"
+                    {:phase :value})))
+  (let [chunks (mapv bounded-bytes! chunks)
+        total (reduce + 0 (map bytes-byte-count chunks))]
+    (when (> total bytes-value-byte-limit)
+      (throw (ex-info "concatenated bytes exceed byte limit"
+                      {:phase :value :bytes total :limit bytes-value-byte-limit})))
+    #?(:clj
+       (let [out (byte-array total)]
+         (loop [i 0 xs chunks]
+           (if (empty? xs)
+             out
+             (let [^bytes c (first xs)
+                   n (alength c)]
+               (System/arraycopy c 0 out i n)
+               (recur (+ i n) (rest xs))))))
+       :cljs
+       (let [out (js/Uint8Array. total)]
+         (loop [i 0 xs (seq chunks)]
+           (if xs
+             (let [c (first xs)
+                   n (.-byteLength c)]
+               (.set out c i)
+               (recur (+ i n) (next xs)))
+             out))))))
+
+(defn make-bytes-stream-from-chunks
+  "Build a bytes-stream by concatenating ordered chunks (multi-chunk producer
+  first slice — single linear payload after join; ADR 0123)."
+  [chunks]
+  (make-bytes-stream (concat-bytes chunks)))
+
 (defn make-ready-bytes-task
   "Construct a host [:task [:stream :bytes]] already :ready with one stream."
   [payload]
@@ -352,6 +388,20 @@
   (when-not (task-value? task)
     (throw (ex-info "not a bytes-task" {:phase :value})))
   (assoc task :kotoba.task/state :cancelled))
+
+(defn task-fulfill!
+  "Transition a :pending bytes-task to :ready with a stream over `payload`.
+  Returns a new task map (same id). Fails closed if not pending or cancelled.
+  This is the reference-path pending→ready scheduling primitive (ADR 0123)."
+  [task payload]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (when-not (= :pending (:kotoba.task/state task))
+    (throw (ex-info "task is not pending"
+                    {:phase :value :state (:kotoba.task/state task)})))
+  (assoc task
+         :kotoba.task/state :ready
+         :kotoba.task/stream (make-bytes-stream payload)))
 
 (defn stream-cancel!
   "Cancel a bytes-stream. Subsequent reads fail closed."
