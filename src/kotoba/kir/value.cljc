@@ -363,7 +363,8 @@
 (defn make-chunk-queue-bytes-stream
   "True multi-chunk producer stream (ADR 0125): each `stream-read!` yields one
   producer chunk without pre-joining. A single producer chunk that exceeds
-  `max-bytes` fails closed (atomic chunks). Empty remaining queue → done."
+  `max-bytes` fails closed (atomic chunks). Empty remaining queue → done
+  (closed queue; not progressive)."
   [chunks]
   (when-not (and (sequential? chunks) (seq chunks))
     (throw (ex-info "chunk-queue requires a non-empty sequence of bytes"
@@ -379,7 +380,24 @@
      :kotoba.stream/payload (empty-bytes)
      :kotoba.stream/state (atom {:mode :chunk-queue
                                  :queue (vec chunks)
+                                 :open? false
+                                 :enqueued-bytes total
                                  :cancelled? false})}))
+
+(defn make-open-chunk-queue-bytes-stream
+  "Progressive multi-chunk stream (ADR 0126): starts empty and open.
+  Producer `stream-enqueue!` while consumer may `stream-read!`;
+  `stream-close!` ends the stream. Empty+open reads return
+  `{:pending? true :done? false}` (non-blocking poll)."
+  []
+  {:kotoba.stream/id (next-handle-id!)
+   :kotoba.stream/item-type :bytes
+   :kotoba.stream/payload (empty-bytes)
+   :kotoba.stream/state (atom {:mode :chunk-queue
+                               :queue []
+                               :open? true
+                               :enqueued-bytes 0
+                               :cancelled? false})})
 
 (defn make-ready-bytes-task
   "Construct a host [:task [:stream :bytes]] already :ready with one stream."
@@ -397,6 +415,15 @@
    :kotoba.task/result-type [:stream :bytes]
    :kotoba.task/state :ready
    :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)})
+
+(defn make-ready-open-chunk-queue-task
+  "Ready task with an open progressive stream (ADR 0126). Host enqueues then
+  closes; consumer polls stream-read! for pending/ready/done."
+  []
+  {:kotoba.task/id (next-handle-id!)
+   :kotoba.task/result-type [:stream :bytes]
+   :kotoba.task/state :ready
+   :kotoba.task/stream (make-open-chunk-queue-bytes-stream)})
 
 (defn make-pending-bytes-task
   "Construct a host bytes-task still :pending (no stream yet)."
@@ -450,6 +477,18 @@
          :kotoba.task/state :ready
          :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)))
 
+(defn task-fulfill-open-chunk-queue!
+  "Fulfill a pending task with an open progressive stream (ADR 0126)."
+  [task]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (when-not (= :pending (:kotoba.task/state task))
+    (throw (ex-info "task is not pending"
+                    {:phase :value :state (:kotoba.task/state task)})))
+  (assoc task
+         :kotoba.task/state :ready
+         :kotoba.task/stream (make-open-chunk-queue-bytes-stream)))
+
 (defn stream-cancel!
   "Cancel a bytes-stream. Subsequent reads fail closed."
   [stream]
@@ -458,11 +497,64 @@
   (swap! (:kotoba.stream/state stream) assoc :cancelled? true)
   stream)
 
+(defn stream-enqueue!
+  "Push one producer chunk onto an open chunk-queue stream (ADR 0126).
+  Fails closed if not chunk-queue, cancelled, or already closed. Total
+  enqueued bytes across the stream lifetime share `bytes-value-byte-limit`."
+  [stream chunk]
+  (when-not (stream-value? stream)
+    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (let [st (:kotoba.stream/state stream)
+        snap @st
+        payload (bounded-bytes! chunk)
+        n (bytes-byte-count payload)]
+    (when-not (= :chunk-queue (:mode snap))
+      (throw (ex-info "stream-enqueue! requires chunk-queue mode"
+                      {:phase :value})))
+    (when (:cancelled? snap)
+      (throw (ex-info "bytes-stream is cancelled" {:phase :value})))
+    (when-not (:open? snap)
+      (throw (ex-info "bytes-stream is closed; cannot enqueue"
+                      {:phase :value})))
+    (let [total (+ (long (:enqueued-bytes snap 0)) n)]
+      (when (> total bytes-value-byte-limit)
+        (throw (ex-info "chunk-queue total enqueued bytes exceed byte limit"
+                        {:phase :value :bytes total :limit bytes-value-byte-limit})))
+      (swap! st (fn [s]
+                  (when-not (and (= :chunk-queue (:mode s))
+                                 (:open? s)
+                                 (not (:cancelled? s)))
+                    (throw (ex-info "bytes-stream is not open for enqueue"
+                                    {:phase :value})))
+                  (assoc s
+                         :queue (conj (vec (:queue s)) payload)
+                         :enqueued-bytes (+ (long (:enqueued-bytes s 0)) n))))
+      stream)))
+
+(defn stream-close!
+  "Close an open chunk-queue stream (ADR 0126). Further enqueue fails;
+  reads drain remaining queue then complete with done?."
+  [stream]
+  (when-not (stream-value? stream)
+    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (let [st (:kotoba.stream/state stream)
+        snap @st]
+    (when-not (= :chunk-queue (:mode snap))
+      (throw (ex-info "stream-close! requires chunk-queue mode"
+                      {:phase :value})))
+    (when (:cancelled? snap)
+      (throw (ex-info "bytes-stream is cancelled" {:phase :value})))
+    (swap! st assoc :open? false)
+    stream))
+
 (defn stream-read!
-  "Pull up to max-bytes from a bytes-stream. Returns {:bytes <bytes> :done? bool}.
+  "Pull up to max-bytes from a bytes-stream.
+  Returns {:bytes <bytes> :done? bool :pending? bool?}.
   Linear mode (default): splits a single payload by max-bytes.
-  Chunk-queue mode (ADR 0125): yields one whole producer chunk per call;
-  a producer chunk larger than max-bytes fails closed."
+  Chunk-queue mode (ADR 0125/0126): yields one whole producer chunk per call;
+  a producer chunk larger than max-bytes fails closed.
+  Open progressive queue (ADR 0126): empty+open → {:pending? true :done? false};
+  empty+closed → done."
   [stream max-bytes]
   (when-not (stream-value? stream)
     (throw (ex-info "not a bytes-stream" {:phase :value})))
@@ -474,9 +566,13 @@
     (when (:cancelled? @st)
       (throw (ex-info "bytes-stream is cancelled" {:phase :value})))
     (if (= :chunk-queue (:mode @st))
-      (let [q (:queue @st)]
+      (let [snap @st
+            q (:queue snap)
+            open? (boolean (:open? snap))]
         (if (empty? q)
-          {:bytes (empty-bytes) :done? true}
+          (if open?
+            {:bytes (empty-bytes) :done? false :pending? true}
+            {:bytes (empty-bytes) :done? true :pending? false})
           (let [head (first q)
                 n (bytes-byte-count head)]
             (when (> n max-bytes)
@@ -484,20 +580,24 @@
                               {:phase :value :chunk-bytes n :max-bytes max-bytes})))
             (let [rest-q (vec (rest q))]
               (swap! st assoc :queue rest-q)
-              {:bytes head :done? (empty? rest-q)}))))
+              ;; re-check open? after dequeue (producer may still be open)
+              (let [still-open? (boolean (:open? @st))]
+                {:bytes head
+                 :done? (and (empty? rest-q) (not still-open?))
+                 :pending? false})))))
       (let [payload (:kotoba.stream/payload stream)
             total (bytes-byte-count payload)
             offset (:offset @st 0)
             remain (- total offset)]
         (if (<= remain 0)
-          {:bytes (empty-bytes) :done? true}
+          {:bytes (empty-bytes) :done? true :pending? false}
           (let [n (min remain max-bytes)
                 chunk #?(:clj (java.util.Arrays/copyOfRange ^bytes payload (int offset) (int (+ offset n)))
                          :cljs (.slice payload offset (+ offset n)))
                 next-offset (+ offset n)
                 done? (>= next-offset total)]
             (swap! st assoc :offset next-offset)
-            {:bytes chunk :done? done?}))))))
+            {:bytes chunk :done? done? :pending? false}))))))
 
 
 (defn utf8-substring!
