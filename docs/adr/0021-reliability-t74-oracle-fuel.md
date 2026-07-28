@@ -17,12 +17,11 @@
 ## Decision
 
 1. Private `oracle-fuel` = **100_000** for `lower`'s constant oracle only.
-2. If oracle still hits fuel/host-stack exhaustion, leave `:oracle-value`
-   **nil** (folding fail-open) instead of aborting lower.
-3. **Trampoline** self-calls when the target is `__kotoba_loop_N` **and** it is
+2. **Trampoline** self-calls when the target is `__kotoba_loop_N` **and** it is
    the current call-stack tip (frontend-synthesized tail-recursive helpers).
    Fuel still charges 1 unit per entry; host stack does not grow.
-4. Runtime `execute` default remains **512**; deep cases pass `{:fuel n}`.
+3. Runtime `execute` default remains **512**; deep cases pass `{:fuel n}`.
+4. Unbounded non-helper recursion still traps during lower (fail closed).
 
 ## Not claimed
 
@@ -32,4 +31,4 @@
 ## Consequences
 
 - 10k pure loop dual-backend (KIR + wasm) is reachable with raised fuel.
-- Infinite pure loops no longer hang lower forever (finite oracle budget).
+- Infinite pure self-recursion still aborts compile via oracle fuel/stack trap.
