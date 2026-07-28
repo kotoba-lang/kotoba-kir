@@ -292,6 +292,38 @@
   []
   (swap! handle-seq inc))
 
+;; ---------------------------------------------------------------------------
+;; Linear resource table (ADR 0133)
+;; Host-side registry for affine task/stream handles. Construction registers;
+;; ops require :alive; drop! clears. Use-after-drop and double-drop fail closed.
+;; This is the reference dual-runtime ownership plane — not the Component Model
+;; resource table ABI (wasm packaging still intermediate, ADR 0130/0131).
+;; ---------------------------------------------------------------------------
+
+(def ^:private resource-table
+  (atom {:tasks {} :streams {}}))
+
+(defn resource-table-reset!
+  "Test helper: clear the linear resource table and handle id sequence."
+  []
+  (reset! resource-table {:tasks {} :streams {}})
+  (reset! handle-seq 0)
+  nil)
+
+(defn- register-stream!
+  [stream]
+  (swap! resource-table assoc-in [:streams (:kotoba.stream/id stream)]
+         {:alive true})
+  stream)
+
+(defn- register-task!
+  [task]
+  (when-let [s (:kotoba.task/stream task)]
+    (register-stream! s))
+  (swap! resource-table assoc-in [:tasks (:kotoba.task/id task)]
+         {:alive true})
+  task)
+
 (defn stream-value?
   "Host affine handle for [:stream :bytes]."
   [value]
@@ -311,14 +343,67 @@
        (let [s (:kotoba.task/stream value)]
          (or (nil? s) (stream-value? s)))))
 
+(defn- require-stream-alive!
+  [stream]
+  (when-not (stream-value? stream)
+    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (let [id (:kotoba.stream/id stream)
+        e (get-in @resource-table [:streams id])]
+    (when-not (and e (:alive e))
+      (throw (ex-info "bytes-stream is not live"
+                      {:phase :value :id id})))))
+
+(defn- require-task-alive!
+  [task]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (let [id (:kotoba.task/id task)
+        e (get-in @resource-table [:tasks id])]
+    (when-not (and e (:alive e))
+      (throw (ex-info "bytes-task is not live"
+                      {:phase :value :id id})))))
+
+(defn stream-drop!
+  "Linear drop of a bytes-stream. Subsequent ops on this id fail closed.
+  Double-drop fails closed."
+  [stream]
+  (require-stream-alive! stream)
+  (swap! resource-table assoc-in [:streams (:kotoba.stream/id stream) :alive] false)
+  nil)
+
+(defn task-drop!
+  "Linear drop of a bytes-task (and its ready stream if any). Subsequent ops
+  on these ids fail closed. Double-drop fails closed."
+  [task]
+  (require-task-alive! task)
+  (when-let [s (:kotoba.task/stream task)]
+    (when (get-in @resource-table [:streams (:kotoba.stream/id s) :alive])
+      (stream-drop! s)))
+  (swap! resource-table assoc-in [:tasks (:kotoba.task/id task) :alive] false)
+  nil)
+
+(defn stream-live?
+  "True when stream id is registered and alive in the resource table."
+  [stream]
+  (boolean (and (stream-value? stream)
+                (get-in @resource-table [:streams (:kotoba.stream/id stream) :alive]))))
+
+(defn task-live?
+  "True when task id is registered and alive in the resource table."
+  [task]
+  (boolean (and (task-value? task)
+                (get-in @resource-table [:tasks (:kotoba.task/id task) :alive]))))
+
 (defn make-bytes-stream
-  "Construct a host [:stream :bytes] value over a single payload chunk."
+  "Construct a host [:stream :bytes] value over a single payload chunk.
+  Registers the handle in the linear resource table (ADR 0133)."
   [payload]
   (let [payload (bounded-bytes! payload)]
-    {:kotoba.stream/id (next-handle-id!)
-     :kotoba.stream/item-type :bytes
-     :kotoba.stream/payload payload
-     :kotoba.stream/state (atom {:offset 0 :cancelled? false})}))
+    (register-stream!
+     {:kotoba.stream/id (next-handle-id!)
+      :kotoba.stream/item-type :bytes
+      :kotoba.stream/payload payload
+      :kotoba.stream/state (atom {:offset 0 :cancelled? false})})))
 
 (defn concat-bytes
   "Concatenate a sequence of host :bytes values into one bounded payload."
@@ -374,15 +459,16 @@
     (when (> total bytes-value-byte-limit)
       (throw (ex-info "chunk-queue total bytes exceed byte limit"
                       {:phase :value :bytes total :limit bytes-value-byte-limit})))
-    {:kotoba.stream/id (next-handle-id!)
-     :kotoba.stream/item-type :bytes
-     ;; Linear payload unused; kept empty so stream-value? stays uniform.
-     :kotoba.stream/payload (empty-bytes)
-     :kotoba.stream/state (atom {:mode :chunk-queue
-                                 :queue (vec chunks)
-                                 :open? false
-                                 :enqueued-bytes total
-                                 :cancelled? false})}))
+    (register-stream!
+     {:kotoba.stream/id (next-handle-id!)
+      :kotoba.stream/item-type :bytes
+      ;; Linear payload unused; kept empty so stream-value? stays uniform.
+      :kotoba.stream/payload (empty-bytes)
+      :kotoba.stream/state (atom {:mode :chunk-queue
+                                  :queue (vec chunks)
+                                  :open? false
+                                  :enqueued-bytes total
+                                  :cancelled? false})})))
 
 (defn make-open-chunk-queue-bytes-stream
   "Progressive multi-chunk stream (ADR 0126): starts empty and open.
@@ -390,64 +476,69 @@
   `stream-close!` ends the stream. Empty+open reads return
   `{:pending? true :done? false}` (non-blocking poll)."
   []
-  {:kotoba.stream/id (next-handle-id!)
-   :kotoba.stream/item-type :bytes
-   :kotoba.stream/payload (empty-bytes)
-   :kotoba.stream/state (atom {:mode :chunk-queue
-                               :queue []
-                               :open? true
-                               :enqueued-bytes 0
-                               :cancelled? false})})
+  (register-stream!
+   {:kotoba.stream/id (next-handle-id!)
+    :kotoba.stream/item-type :bytes
+    :kotoba.stream/payload (empty-bytes)
+    :kotoba.stream/state (atom {:mode :chunk-queue
+                                :queue []
+                                :open? true
+                                :enqueued-bytes 0
+                                :cancelled? false})}))
 
 (defn make-ready-bytes-task
-  "Construct a host [:task [:stream :bytes]] already :ready with one stream."
+  "Construct a host [:task [:stream :bytes]] already :ready with one stream.
+  Registers the task (and stream) in the linear resource table (ADR 0133)."
   [payload]
-  {:kotoba.task/id (next-handle-id!)
-   :kotoba.task/result-type [:stream :bytes]
-   :kotoba.task/state :ready
-   :kotoba.task/stream (make-bytes-stream payload)})
+  (register-task!
+   {:kotoba.task/id (next-handle-id!)
+    :kotoba.task/result-type [:stream :bytes]
+    :kotoba.task/state :ready
+    :kotoba.task/stream (make-bytes-stream payload)}))
 
 (defn make-ready-bytes-task-from-chunk-queue
   "Ready task whose stream yields each producer chunk on successive reads
   (true multi-chunk; ADR 0125)."
   [chunks]
-  {:kotoba.task/id (next-handle-id!)
-   :kotoba.task/result-type [:stream :bytes]
-   :kotoba.task/state :ready
-   :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)})
+  (register-task!
+   {:kotoba.task/id (next-handle-id!)
+    :kotoba.task/result-type [:stream :bytes]
+    :kotoba.task/state :ready
+    :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)}))
 
 (defn make-ready-open-chunk-queue-task
   "Ready task with an open progressive stream (ADR 0126). Host enqueues then
   closes; consumer polls stream-read! for pending/ready/done."
   []
-  {:kotoba.task/id (next-handle-id!)
-   :kotoba.task/result-type [:stream :bytes]
-   :kotoba.task/state :ready
-   :kotoba.task/stream (make-open-chunk-queue-bytes-stream)})
+  (register-task!
+   {:kotoba.task/id (next-handle-id!)
+    :kotoba.task/result-type [:stream :bytes]
+    :kotoba.task/state :ready
+    :kotoba.task/stream (make-open-chunk-queue-bytes-stream)}))
 
 (defn make-pending-bytes-task
   "Construct a host bytes-task still :pending (no stream yet)."
   []
-  {:kotoba.task/id (next-handle-id!)
-   :kotoba.task/result-type [:stream :bytes]
-   :kotoba.task/state :pending
-   :kotoba.task/stream nil})
+  (register-task!
+   {:kotoba.task/id (next-handle-id!)
+    :kotoba.task/result-type [:stream :bytes]
+    :kotoba.task/state :pending
+    :kotoba.task/stream nil}))
 
 (defn task-poll
-  "Poll a bytes-task. Returns {:state :ready|:pending|:cancelled :stream s?}."
+  "Poll a bytes-task. Returns {:state :ready|:pending|:cancelled :stream s?}.
+  Requires the task to be live in the resource table (ADR 0133)."
   [task]
-  (when-not (task-value? task)
-    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (require-task-alive! task)
   (case (:kotoba.task/state task)
     :ready {:state :ready :stream (:kotoba.task/stream task)}
     :pending {:state :pending}
     :cancelled {:state :cancelled}))
 
 (defn task-cancel!
-  "Return a cancelled copy of the task."
+  "Return a cancelled copy of the task (same id remains live until drop)."
   [task]
-  (when-not (task-value? task)
-    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (require-task-alive! task)
   (assoc task :kotoba.task/state :cancelled))
 
 (defn task-fulfill!
@@ -455,8 +546,7 @@
   Returns a new task map (same id). Fails closed if not pending or cancelled.
   This is the reference-path pending→ready scheduling primitive (ADR 0123)."
   [task payload]
-  (when-not (task-value? task)
-    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (require-task-alive! task)
   (when-not (= :pending (:kotoba.task/state task))
     (throw (ex-info "task is not pending"
                     {:phase :value :state (:kotoba.task/state task)})))
@@ -468,8 +558,7 @@
   "Fulfill a pending task with a true multi-chunk stream (ADR 0125).
   Same id; fails closed if not pending."
   [task chunks]
-  (when-not (task-value? task)
-    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (require-task-alive! task)
   (when-not (= :pending (:kotoba.task/state task))
     (throw (ex-info "task is not pending"
                     {:phase :value :state (:kotoba.task/state task)})))
@@ -480,8 +569,7 @@
 (defn task-fulfill-open-chunk-queue!
   "Fulfill a pending task with an open progressive stream (ADR 0126)."
   [task]
-  (when-not (task-value? task)
-    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (require-task-alive! task)
   (when-not (= :pending (:kotoba.task/state task))
     (throw (ex-info "task is not pending"
                     {:phase :value :state (:kotoba.task/state task)})))
@@ -492,8 +580,7 @@
 (defn stream-cancel!
   "Cancel a bytes-stream. Subsequent reads fail closed."
   [stream]
-  (when-not (stream-value? stream)
-    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (require-stream-alive! stream)
   (swap! (:kotoba.stream/state stream) assoc :cancelled? true)
   stream)
 
@@ -502,8 +589,7 @@
   Fails closed if not chunk-queue, cancelled, or already closed. Total
   enqueued bytes across the stream lifetime share `bytes-value-byte-limit`."
   [stream chunk]
-  (when-not (stream-value? stream)
-    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (require-stream-alive! stream)
   (let [st (:kotoba.stream/state stream)
         snap @st
         payload (bounded-bytes! chunk)
@@ -535,8 +621,7 @@
   "Close an open chunk-queue stream (ADR 0126). Further enqueue fails;
   reads drain remaining queue then complete with done?."
   [stream]
-  (when-not (stream-value? stream)
-    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (require-stream-alive! stream)
   (let [st (:kotoba.stream/state stream)
         snap @st]
     (when-not (= :chunk-queue (:mode snap))
@@ -556,8 +641,7 @@
   Open progressive queue (ADR 0126): empty+open → {:pending? true :done? false};
   empty+closed → done."
   [stream max-bytes]
-  (when-not (stream-value? stream)
-    (throw (ex-info "not a bytes-stream" {:phase :value})))
+  (require-stream-alive! stream)
   (when-not (and (integer? max-bytes) (pos? max-bytes)
                  (<= max-bytes bytes-value-byte-limit))
     (throw (ex-info "stream-read max-bytes out of range"
