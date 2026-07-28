@@ -356,6 +356,31 @@
   [chunks]
   (make-bytes-stream (concat-bytes chunks)))
 
+(defn- empty-bytes
+  []
+  #?(:clj (byte-array 0) :cljs (js/Uint8Array. 0)))
+
+(defn make-chunk-queue-bytes-stream
+  "True multi-chunk producer stream (ADR 0125): each `stream-read!` yields one
+  producer chunk without pre-joining. A single producer chunk that exceeds
+  `max-bytes` fails closed (atomic chunks). Empty remaining queue → done."
+  [chunks]
+  (when-not (and (sequential? chunks) (seq chunks))
+    (throw (ex-info "chunk-queue requires a non-empty sequence of bytes"
+                    {:phase :value})))
+  (let [chunks (mapv bounded-bytes! chunks)
+        total (reduce + 0 (map bytes-byte-count chunks))]
+    (when (> total bytes-value-byte-limit)
+      (throw (ex-info "chunk-queue total bytes exceed byte limit"
+                      {:phase :value :bytes total :limit bytes-value-byte-limit})))
+    {:kotoba.stream/id (next-handle-id!)
+     :kotoba.stream/item-type :bytes
+     ;; Linear payload unused; kept empty so stream-value? stays uniform.
+     :kotoba.stream/payload (empty-bytes)
+     :kotoba.stream/state (atom {:mode :chunk-queue
+                                 :queue (vec chunks)
+                                 :cancelled? false})}))
+
 (defn make-ready-bytes-task
   "Construct a host [:task [:stream :bytes]] already :ready with one stream."
   [payload]
@@ -363,6 +388,15 @@
    :kotoba.task/result-type [:stream :bytes]
    :kotoba.task/state :ready
    :kotoba.task/stream (make-bytes-stream payload)})
+
+(defn make-ready-bytes-task-from-chunk-queue
+  "Ready task whose stream yields each producer chunk on successive reads
+  (true multi-chunk; ADR 0125)."
+  [chunks]
+  {:kotoba.task/id (next-handle-id!)
+   :kotoba.task/result-type [:stream :bytes]
+   :kotoba.task/state :ready
+   :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)})
 
 (defn make-pending-bytes-task
   "Construct a host bytes-task still :pending (no stream yet)."
@@ -403,6 +437,19 @@
          :kotoba.task/state :ready
          :kotoba.task/stream (make-bytes-stream payload)))
 
+(defn task-fulfill-chunk-queue!
+  "Fulfill a pending task with a true multi-chunk stream (ADR 0125).
+  Same id; fails closed if not pending."
+  [task chunks]
+  (when-not (task-value? task)
+    (throw (ex-info "not a bytes-task" {:phase :value})))
+  (when-not (= :pending (:kotoba.task/state task))
+    (throw (ex-info "task is not pending"
+                    {:phase :value :state (:kotoba.task/state task)})))
+  (assoc task
+         :kotoba.task/state :ready
+         :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)))
+
 (defn stream-cancel!
   "Cancel a bytes-stream. Subsequent reads fail closed."
   [stream]
@@ -412,7 +459,10 @@
   stream)
 
 (defn stream-read!
-  "Pull up to max-bytes from a bytes-stream. Returns {:bytes <bytes> :done? bool}."
+  "Pull up to max-bytes from a bytes-stream. Returns {:bytes <bytes> :done? bool}.
+  Linear mode (default): splits a single payload by max-bytes.
+  Chunk-queue mode (ADR 0125): yields one whole producer chunk per call;
+  a producer chunk larger than max-bytes fails closed."
   [stream max-bytes]
   (when-not (stream-value? stream)
     (throw (ex-info "not a bytes-stream" {:phase :value})))
@@ -420,23 +470,34 @@
                  (<= max-bytes bytes-value-byte-limit))
     (throw (ex-info "stream-read max-bytes out of range"
                     {:phase :value :max-bytes max-bytes})))
-  (let [st (:kotoba.stream/state stream)
-        payload (:kotoba.stream/payload stream)
-        total (bytes-byte-count payload)]
+  (let [st (:kotoba.stream/state stream)]
     (when (:cancelled? @st)
       (throw (ex-info "bytes-stream is cancelled" {:phase :value})))
-    (let [offset (:offset @st)
-          remain (- total offset)]
-      (if (<= remain 0)
-        {:bytes #?(:clj (byte-array 0) :cljs (js/Uint8Array. 0))
-         :done? true}
-        (let [n (min remain max-bytes)
-              chunk #?(:clj (java.util.Arrays/copyOfRange ^bytes payload (int offset) (int (+ offset n)))
-                       :cljs (.slice payload offset (+ offset n)))
-              next-offset (+ offset n)
-              done? (>= next-offset total)]
-          (swap! st assoc :offset next-offset)
-          {:bytes chunk :done? done?})))))
+    (if (= :chunk-queue (:mode @st))
+      (let [q (:queue @st)]
+        (if (empty? q)
+          {:bytes (empty-bytes) :done? true}
+          (let [head (first q)
+                n (bytes-byte-count head)]
+            (when (> n max-bytes)
+              (throw (ex-info "chunk-queue producer chunk exceeds max-bytes"
+                              {:phase :value :chunk-bytes n :max-bytes max-bytes})))
+            (let [rest-q (vec (rest q))]
+              (swap! st assoc :queue rest-q)
+              {:bytes head :done? (empty? rest-q)}))))
+      (let [payload (:kotoba.stream/payload stream)
+            total (bytes-byte-count payload)
+            offset (:offset @st 0)
+            remain (- total offset)]
+        (if (<= remain 0)
+          {:bytes (empty-bytes) :done? true}
+          (let [n (min remain max-bytes)
+                chunk #?(:clj (java.util.Arrays/copyOfRange ^bytes payload (int offset) (int (+ offset n)))
+                         :cljs (.slice payload offset (+ offset n)))
+                next-offset (+ offset n)
+                done? (>= next-offset total)]
+            (swap! st assoc :offset next-offset)
+            {:bytes chunk :done? done?}))))))
 
 
 (defn utf8-substring!
