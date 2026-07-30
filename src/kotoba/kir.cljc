@@ -2275,18 +2275,35 @@
                                     functions
                                     (volatile! fuel) {:cells (volatile! []) :capacity pair-capacity
                                                       :datoms (volatile! []) :kgraph-capacity kgraph-capacity}
-                                    [] cap-dispatch))]
+                                    [] cap-dispatch))
+           ;; Box a `:bool` result at the boundary, the way every other target
+           ;; does. `:bool` is a plain 0/1 word inside the interpreter (and
+           ;; inside a wasm module, and in the native backends' setcc
+           ;; sequences), but the value that LEAVES a target is a host boolean:
+           ;; the restricted-ESM emitter returns one, and `kotoba.wasm.core`
+           ;; emits an export wrapper that boxes one. The reference was the
+           ;; only target still handing back 1/0, so the shared corpora --
+           ;; whose whole purpose is that all three agree on the same value --
+           ;; could not hold for a predicate.
+           ;;
+           ;; A `:bool` ARGUMENT has always required a real boolean here (see
+           ;; the param check above), so this makes the two directions
+           ;; symmetric rather than introducing a new convention.
+           box-bool (fn [value]
+                      (if (and (= :bool (:result function)) (not (boolean? value)))
+                        (not #?(:clj (zero? value) :cljs (i64/k-zero? value)))
+                        value))]
        #?(:clj
           ;; A host JVM with a small native stack can exhaust that stack just
           ;; before the fixed Kotoba call budget does.  Host resource errors
           ;; must never escape the language boundary: normalize this one
           ;; precise failure to the same deterministic, fail-closed trap.
           (try
-            (invoke)
+            (box-bool (invoke))
             (catch StackOverflowError _
               (trap! :fuel-exhausted {:limit fuel :host-stack-exhausted true})))
           :cljs
-          (invoke))))))
+          (box-bool (invoke)))))))
 
 (defn lower [hir]
   (let [kernel-operations '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
