@@ -2126,11 +2126,15 @@
                bit-xor (apply bit-xor xs)
                bit-and (apply bit-and xs)
                bit-or (apply bit-or xs)
-               = (if (apply = xs) 1 0)
-               < (if (apply < xs) 1 0)
-               > (if (apply > xs) 1 0)
-               <= (if (apply <= xs) 1 0)
-               >= (if (apply >= xs) 1 0))
+               ;; Comparisons produce genuine booleans, matching the
+               ;; `:bool` type the frontend now infers for them. `if` already
+               ;; accepts either a boolean or a legacy 0/1 integer test, so
+               ;; existing integer-conditioned programs keep working.
+               = (apply = xs)
+               < (apply < xs)
+               > (apply > xs)
+               <= (apply <= xs)
+               >= (apply >= xs))
              :cljs
              ;; `xs` are always bigint already (every literal/sub-expression
              ;; passed through the coercion above), so plain `bit-xor`/
@@ -2154,11 +2158,11 @@
                bit-xor (i64/->bigint (apply bit-xor xs))
                bit-and (i64/->bigint (apply bit-and xs))
                bit-or (i64/->bigint (apply bit-or xs))
-               = (if (apply = xs) i64/one i64/zero)
-               < (if (apply < xs) i64/one i64/zero)
-               > (if (apply > xs) i64/one i64/zero)
-               <= (if (apply <= xs) i64/one i64/zero)
-               >= (if (apply >= xs) i64/one i64/zero))))
+               = (apply = xs)
+               < (apply < xs)
+               > (apply > xs)
+               <= (apply <= xs)
+               >= (apply >= xs))))
 
         (contains? '#{bit-not i64-shift-left i64-shift-right u64-shift-right} op)
         (let [xs (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
