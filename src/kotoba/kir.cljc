@@ -647,7 +647,15 @@
         (trap! :invalid-map-value {:position position :message (ex-message error)})))
 
     :bool
-    (when-not (boolean? runtime-value)
+    ;; `:bool` is a plain 0/1 word, not a distinct runtime representation: the
+    ;; wasm32 backend returns 1/0 and comparisons evaluate to 1/0 here, while
+    ;; `true`/`false` literals stay booleans. Accepting both keeps the two
+    ;; backends' results identical, which the dual-backend runner compares.
+    (when-not (or (boolean? runtime-value)
+                  #?(:clj (and (integer? runtime-value) (<= 0 runtime-value 1))
+                     :cljs (and (i64/bigint-value? runtime-value)
+                                (or (i64/k-zero? runtime-value)
+                                    (= runtime-value i64/one)))))
       (trap! :value-type-mismatch {:expected :bool :position position}))
 
     :option-i64
