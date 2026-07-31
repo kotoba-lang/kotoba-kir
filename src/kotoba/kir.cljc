@@ -62,7 +62,7 @@
      variant-new variant-match
      option-some-of option-none-of option-some?-of option-value-of option-match
      hetero-vector-new hetero-vector-count hetero-vector-at hetero-vector-assoc hetero-vector-equal
-     typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal
+     typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal typed-set-nth
      typed-map-new typed-map-count typed-map-contains typed-map-get
      typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal
      xml-path-count xml-name-count xml-name-text xml-path-text xml-path-attr
@@ -1628,6 +1628,17 @@
                      type (eval-expr right-form env functions fuel heap call-stack cap-call))]
           #?(:clj (if (= left right) 1 0)
              :cljs (if (= left right) i64/one i64/zero)))
+
+        (= op 'typed-set-nth)
+        (let [[type value-form index-form] args
+              set-value (value/bounded-typed-value!
+                         type (eval-expr value-form env functions fuel heap call-stack cap-call))
+              raw-index (eval-expr index-form env functions fuel heap call-stack cap-call)
+              index #?(:clj (long raw-index) :cljs (js/Number raw-index))
+              items (second set-value)]
+          (when (or (neg? index) (>= index (count items)))
+            (trap! :set-index-out-of-bounds {:index index :count (count items)}))
+          (value/bounded-typed-value! (second type) (nth items index)))
 
         (= op 'typed-map-new)
         (let [[type & entry-forms] args
