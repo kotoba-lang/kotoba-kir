@@ -31,7 +31,10 @@
 ;; bound into an unbounded host allocation. All string/keyword leaves in one
 ;; canonical typed value share this aggregate UTF-8 payload budget.
 (def canonical-indirect-byte-limit 1048576)
-(def adt-depth-limit 8)
+;; Raised 8 → 12 for T8.3/W4 structured key/value pair spines in recursive
+;; EDN ADTs (pair-of-entry-pairs for header maps + request/result spines).
+;; Document depth stays at document-depth-limit 8. ADR kotoba-kir 0025.
+(def adt-depth-limit 12)
 (def adt-node-limit 64)
 (def variant-case-limit 32)
 (def heterogeneous-vector-item-limit 32)

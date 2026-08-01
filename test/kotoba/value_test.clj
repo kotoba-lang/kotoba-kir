@@ -50,7 +50,7 @@
                  (value/bounded-typed-value! type [true 7])))
     (is (thrown? clojure.lang.ExceptionInfo
                  (value/bounded-typed-value! type [false [true "7"]]))))
-  (let [too-deep (nth (iterate (fn [t] [:result :i64 t]) :bool) 9)]
+  (let [too-deep (nth (iterate (fn [t] [:result :i64 t]) :bool) 13)]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"depth limit"
                           (value/validate-value-type! too-deep)))))
 
