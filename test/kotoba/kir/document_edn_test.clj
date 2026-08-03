@@ -23,6 +23,12 @@
     (is (= ["symbol" 'actor/run]
            (value/document-read (value/document-print ["symbol" 'actor/run]))))))
 
+(deftest textual-edn-printer-rejects-ambiguous-symbols
+  (doseq [item [(symbol "nil") (symbol "true") (symbol "42")
+                (symbol ":keyword") (symbol "#tag")]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"ambiguous symbol"
+                          (value/document-edn-print ["symbol" item])))))
+
 (deftest textual-edn-reader-fails-closed
   (doseq [[label input]
           [["empty" ""]

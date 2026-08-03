@@ -1284,6 +1284,18 @@
     ;; EDN must retain a floating marker so integral doubles do not decode as i64.
     (if (or (some #{\. \e \E} text)) text (str text ".0"))))
 
+(defn- document-edn-symbol-text [value]
+  (let [text (str (bounded-symbol! value symbol-value-byte-limit))]
+    (when (or (contains? #{"nil" "true" "false"} text)
+              (.startsWith text ":")
+              (.startsWith text "#")
+              (re-find #"[\s,\[\]{}()\"';`~^\\]" text)
+              (re-matches #"[+-]?[0-9]+" text)
+              (re-matches #"[+-]?(?:(?:[0-9]+\.[0-9]*)|(?:[0-9]*\.[0-9]+)|(?:[0-9]+[eE][+-]?[0-9]+))(?:[eE][+-]?[0-9]+)?" text))
+      (throw (ex-info "document-edn-print rejects ambiguous symbol"
+                      {:phase :value :symbol text})))
+    text))
+
 (defn document-edn-print
   "Deterministic textual EDN for the bounded document profile. The profile is
   deliberately closed to nil, booleans, i64/f64, strings, keywords, symbols,
@@ -1299,7 +1311,7 @@
                 "f64" (document-edn-f64-text payload)
                 "string" (document-edn-escape-string payload)
                 "keyword" (str payload)
-                "symbol" (str payload)
+                "symbol" (document-edn-symbol-text payload)
                 "vector" (str "[" (str/join " " (map walk payload)) "]")
                 "map" (str "{" (str/join
                                   " " (map (fn [[key item]]
