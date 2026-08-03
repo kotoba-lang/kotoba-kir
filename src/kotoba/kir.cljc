@@ -73,11 +73,11 @@
      vector-f64-drop vector-f64-assoc vector-f64-conj
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
      disjoint-set-i64-new disjoint-set-i64-count disjoint-set-i64-union
-     document-null document-bool document-i64 document-f64 document-string document-keyword
+     document-null document-bool document-i64 document-f64 document-string document-keyword document-symbol
      document-vector document-map document-count document-kind document-equal? document-contains document-get
      document-vector-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
      document-vector-remove
-     document-assoc document-dissoc document-merge document-string-value document-keyword-value
+     document-assoc document-dissoc document-merge document-string-value document-keyword-value document-symbol-value
      document-bool-value document-i64-value document-f64-value document-sha256 document-print document-read
      document-edn-print document-edn-read
      i32-wrap u32-wrap i32-wrapping-add i32-wrapping-mul i32-xor
@@ -1959,9 +1959,9 @@
         (= op 'document-null) ["null"]
 
         (contains? '#{document-bool document-i64 document-f64
-                      document-string document-keyword} op)
+                      document-string document-keyword document-symbol} op)
         (let [type (case op document-bool :bool document-i64 :i64 document-f64 :f64
-                         document-string :string document-keyword :keyword)
+                         document-string :string document-keyword :keyword document-symbol :symbol)
               tag (name type)
               item (value/bounded-typed-value!
                     type (eval-expr (first args) env functions fuel heap call-stack cap-call))]
@@ -2122,11 +2122,11 @@
             (trap! :document-map-too-large {:limit value/document-container-item-limit}))
           (value/bounded-document! ["map" (mapv vec entries)]))
 
-        (contains? '#{document-string-value document-keyword-value document-bool-value
+        (contains? '#{document-string-value document-keyword-value document-symbol-value document-bool-value
                       document-i64-value document-f64-value} op)
         (let [[tag payload] (value/bounded-document!
                              (eval-expr (first args) env functions fuel heap call-stack cap-call))
-              type (case op document-string-value :string document-keyword-value :keyword document-bool-value :bool
+              type (case op document-string-value :string document-keyword-value :keyword document-symbol-value :symbol document-bool-value :bool
                          document-i64-value :i64 document-f64-value :f64)
               option-type [:option type]]
           (if (= tag (name type)) [option-type true payload] [option-type false]))
