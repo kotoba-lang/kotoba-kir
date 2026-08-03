@@ -1068,51 +1068,53 @@
     (letfn [(emit [n]
               #?(:clj (.add out (int n))
                  :cljs (.push out n)))
+            (ascii [ch]
+              #?(:clj (int ch) :cljs (.charCodeAt ch 0)))
             (emit-str [s]
               (doseq [b (utf8-bytes s)] (emit b)))
             (emit-len-str [s]
               (let [bs (utf8-bytes s)]
                 (emit-str (str (count bs)))
-                (emit (int \:))
+                (emit (ascii \:))
                 (doseq [b bs] (emit b))))
             (walk [node]
               (let [tag (first node)]
                 (case tag
-                  "null" (emit (int \n))
-                  "bool" (do (emit (int \b))
-                             (emit (if (second node) (int \t) (int \f))))
-                  "i64" (do (emit (int \i))
+                  "null" (emit (ascii \n))
+                  "bool" (do (emit (ascii \b))
+                             (emit (if (second node) (ascii \t) (ascii \f))))
+                  "i64" (do (emit (ascii \i))
                             (emit-str (str (second node)))
-                            (emit (int \;)))
-                  "f64" (do (emit (int \f))
+                            (emit (ascii \;)))
+                  "f64" (do (emit (ascii \f))
                             (emit-str (str (f64-to-i64-bits (normalize-document-f64 (second node)))))
-                            (emit (int \;)))
-                  "string" (do (emit (int \s))
+                            (emit (ascii \;)))
+                  "string" (do (emit (ascii \s))
                                (emit-len-str (second node)))
-                  "keyword" (do (emit (int \k))
+                  "keyword" (do (emit (ascii \k))
                                 (emit-len-str (str (second node))))
-                  "symbol" (do (emit (int \y))
+                  "symbol" (do (emit (ascii \y))
                                (emit-len-str (str (second node))))
-                  "vector" (do (emit (int \v))
+                  "vector" (do (emit (ascii \v))
                                (emit-str (str (count (second node))))
-                               (emit (int \:))
+                               (emit (ascii \:))
                                (doseq [item (second node)] (walk item)))
-                  "list" (do (emit (int \l))
+                  "list" (do (emit (ascii \l))
                              (emit-str (str (count (second node))))
-                             (emit (int \:))
+                             (emit (ascii \:))
                              (doseq [item (second node)] (walk item)))
-                  "set" (do (emit (int \e))
+                  "set" (do (emit (ascii \e))
                             (emit-str (str (count (second node))))
-                            (emit (int \:))
+                            (emit (ascii \:))
                             (doseq [item (second node)] (walk item)))
-                  "map" (do (emit (int \m))
+                  "map" (do (emit (ascii \m))
                             (emit-str (str (count (second node))))
-                            (emit (int \:))
+                            (emit (ascii \:))
                             (doseq [[k item] (second node)]
                               (if (= "keyword" (first k))
-                                (do (emit (int \K))
+                                (do (emit (ascii \K))
                                     (emit-len-str (str (second k))))
-                                (do (emit (int \D))
+                                (do (emit (ascii \D))
                                     (walk k)))
                               (walk item)))
                   (throw (ex-info "unknown document tag in canonical encoding"
@@ -1187,9 +1189,9 @@
       (throw (ex-info "document-read hex exceeds size limit"
                       {:phase :value :length n})))
     (dotimes [i n]
-      (let [c #?(:clj (.charAt ^String s i) :cljs (.charAt s i))
-            ok (or (and (>= (int c) 48) (<= (int c) 57))
-                   (and (>= (int c) 97) (<= (int c) 102)))]
+      (let [code #?(:clj (int (.charAt ^String s i)) :cljs (.charCodeAt s i))
+            ok (or (and (>= code 48) (<= code 57))
+                   (and (>= code 97) (<= code 102)))]
         (when-not ok
           (throw (ex-info "document-read hex must be lowercase [0-9a-f]"
                           {:phase :value :index i})))))
@@ -1263,6 +1265,9 @@
                 (catch #?(:clj Exception :cljs :default) _
                   (throw (ex-info "document-read invalid integer"
                                   {:phase :value :text s})))))
+            (take-count []
+              (let [n (parse-int-decimal (take-until 58))]
+                #?(:clj (int n) :cljs (js/Number n))))
             (walk []
               (let [tag (take-byte)]
                 (case tag
@@ -1285,22 +1290,22 @@
                                           {:phase :value :text kw-str})))
                         ["keyword" (keyword (subs kw-str 1))])
                   121 ["symbol" (symbol (take-len-str))]
-                  118 (let [n (int (parse-int-decimal (take-until 58)))]
+                  118 (let [n (take-count)]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read vector count out of range"
                                           {:phase :value :count n})))
                         ["vector" (vec (repeatedly n walk))])
-                  108 (let [n (int (parse-int-decimal (take-until 58)))]
+                  108 (let [n (take-count)]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read list count out of range"
                                           {:phase :value :count n})))
                         ["list" (vec (repeatedly n walk))])
-                  101 (let [n (int (parse-int-decimal (take-until 58)))]
+                  101 (let [n (take-count)]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read set count out of range"
                                           {:phase :value :count n})))
                         ["set" (vec (repeatedly n walk))])
-                  109 (let [n (int (parse-int-decimal (take-until 58)))]
+                  109 (let [n (take-count)]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read map count out of range"
                                           {:phase :value :count n})))
