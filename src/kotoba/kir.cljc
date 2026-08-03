@@ -305,6 +305,22 @@
                          (native-word-value-type? type)
                          (symbol? ok-binder) (symbol? err-binder)
                          (walk value) (walk ok-body) (walk err-body)))
+                  ;; `i32-operations` are admitted on native. They stay in
+                  ;; `non-string-typed-ops` -- the CLJS gate below shares that
+                  ;; set and does NOT implement them (measured 2026-08-03:
+                  ;; 1/9 compile for cljs-kotoba-v1, against 9/9 for wasm32
+                  ;; and js) -- so the exception is made here, for this target
+                  ;; only, rather than by removing them from the shared set.
+                  ;;
+                  ;; Admitting them costs no new value representation: there
+                  ;; is no `:i32` type (`kotoba.kir` mentions `:i32` exactly
+                  ;; once, as a trap keyword), only i64 words carrying 32-bit
+                  ;; wrapping, which both native backends now emit directly.
+                  (contains? '#{i32-wrap u32-wrap i32-wrapping-add i32-wrapping-mul
+                                i32-xor i32-shift-left i32-shift-right u32-shift-right}
+                             op)
+                  (every? walk args)
+
                   ;; `let` MUST be walked explicitly. Without this case it fell
                   ;; to `:else`, which walks `args` -- and the first arg is the
                   ;; binding VECTOR, which is not `seq?` (vectors never are),

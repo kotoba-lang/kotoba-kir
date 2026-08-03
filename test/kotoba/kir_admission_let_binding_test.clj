@@ -21,11 +21,21 @@
 ;; `string-*` is deliberately absent: the native backend implements a qualified
 ;; string slice, so those are admitted by design and would prove nothing here.
 (def ^:private excluded
+  ['(map-new)
+   '(keyword-from-string "k")
+   '(document-null)])
+
+;; Admitted on native, still excluded on cljs. They stay in
+;; `non-string-typed-ops`, which both gates share, so the native predicate
+;; makes the exception for itself -- measured 2026-08-03: 1/9 of these compile
+;; for cljs-kotoba-v1 against 9/9 for wasm32 and js.
+(def ^:private native-only
   ['(u32-wrap 1)
+   '(i32-wrap 1)
    '(i32-xor 1 2)
    '(i32-shift-left 1 2)
-   '(map-new)
-   '(keyword-from-string "k")])
+   '(i32-wrapping-add 1 2)
+   '(u32-shift-right 1 2)])
 
 (deftest a-let-binding-does-not-launder-an-excluded-operation
   (doseq [form excluded]
@@ -40,6 +50,17 @@
       (is (false? (kir/only-native-word-typed-features?
                    (hir (list 'let ['a (list 'let ['b form] 'b)] 'a))))
           "nor nesting the let"))))
+
+(deftest i32-operations-are-admitted-on-native-but-not-on-cljs
+  ;; The asymmetry is deliberate and lives in the native predicate rather than
+  ;; in the shared set, so widening native cannot silently widen cljs.
+  (doseq [form native-only]
+    (testing (str form)
+      (is (true? (kir/only-native-word-typed-features? (hir form))))
+      (is (true? (kir/only-native-word-typed-features? (hir (list 'let ['a form] 'a))))
+          "and a let binding must not change that either")
+      (is (false? (kir/only-cljs-provider-typed-features? (hir form)))
+          "cljs does not implement these and must keep rejecting them")))) 
 
 (deftest the-cljs-predicate-has-the-same-property
   (doseq [form excluded]
