@@ -50,6 +50,15 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"duplicate map key"
                           (value/document-edn-read "{[1] :a [1] :b}")))))
 
+(deftest legacy-keyword-map-keys-preserve-the-node-budget
+  (let [leaf (fn [i] ["map" [[:tag ["string" "span"]]
+                              [:text ["string" (str "n" i)]]]])
+        group (fn [g] ["map" [[:children ["vector" (mapv leaf (range (* g 4) (+ (* g 4) 4)))]]
+                               [:tag ["string" "g"]]]])
+        tree ["map" [[:children ["vector" (mapv group (range 16))]]
+                     [:tag ["string" "root"]]]]]
+    (is (= "map" (first (value/bounded-document! tree))))))
+
 (deftest textual-edn-printer-rejects-ambiguous-symbols
   (doseq [item [(symbol "nil") (symbol "true") (symbol "42")
                 (symbol ":keyword") (symbol "#tag")]]
