@@ -969,6 +969,30 @@
                        :closure-param-indexes indexes})))
     (or indexes [])))
 
+(defn- validated-i64-pair-chain-param-indexes
+  "Validate parameters whose i64 ABI word denotes a zero-terminated, bounded
+  pair-chain of i64 values. This is distinct from a closure pair even though
+  both representations use the pair heap on KIR/Wasm."
+  [function]
+  (let [present? (contains? function :i64-pair-chain-param-indexes)
+        indexes (:i64-pair-chain-param-indexes function)
+        closure-indexes (set (validated-closure-param-indexes function))
+        params (:params function)
+        param-types (or (:param-types function)
+                        (vec (repeat (count params) :i64)))]
+    (when (and present?
+               (not (and (vector? indexes)
+                         (= indexes (vec (sort (distinct indexes))))
+                         (not-any? closure-indexes indexes)
+                         (every? #(and (integer? %) (<= 0 %)
+                                       (< % (count params))
+                                       (= :i64 (nth param-types % nil)))
+                                 indexes))))
+      (throw (ex-info "i64 pair-chain parameter indexes are malformed"
+                      {:phase :ir :function (:name function)
+                       :i64-pair-chain-param-indexes indexes})))
+    (or indexes [])))
+
 (defn- validated-closure-result? [function]
   (let [present? (contains? function :closure-result?)
         closure-result? (:closure-result? function)]
@@ -996,6 +1020,18 @@
                             {:position position :max-captures 5})
         :else (do (read-pair heap chain 0)
                   (recur (read-pair heap chain 1) (inc count)))))))
+
+(defn- validate-i64-pair-chain!
+  [heap handle position]
+  (loop [chain handle
+         count 0]
+    (cond
+      #?(:clj (zero? chain) :cljs (i64/k-zero? chain)) nil
+      (>= count 4) (trap! :i64-pair-chain-limit
+                          {:position position :max-items 4})
+      :else (let [item (read-pair heap chain 0)]
+              (validate-runtime-value! item :i64 (assoc position :pair-item count))
+              (recur (read-pair heap chain 1) (inc count))))))
 
 ;; T7.4 / T7.1: self-tail calls on frontend-synthesized `__kotoba_loop_N`
 ;; helpers trampoline in the KIR interpreter so 10k+ iterations do not blow
@@ -1031,6 +1067,8 @@
     (let [param-types (or (:param-types function)
                           (vec (repeat (count (:params function)) :i64)))
           closure-param-indexes (set (validated-closure-param-indexes function))
+          pair-chain-param-indexes
+          (set (validated-i64-pair-chain-param-indexes function))
           fname (:name function)]
       (doseq [[index parameter runtime-value type]
               (map vector (range) (:params function) values param-types)]
@@ -1038,6 +1076,9 @@
                                                      :parameter parameter})
         (when (contains? closure-param-indexes index)
           (validate-closure-handle! heap runtime-value
+                                    {:function fname :parameter parameter}))
+        (when (contains? pair-chain-param-indexes index)
+          (validate-i64-pair-chain! heap runtime-value
                                     {:function fname :parameter parameter})))
       ;; Charge once on first entry; loop-helper self-tail re-entries are free (T7.1).
       (let [stack' (conj stack fname)]
@@ -2493,6 +2534,7 @@
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
    (doseq [function (:functions kir)]
      (validated-closure-param-indexes function)
+     (validated-i64-pair-chain-param-indexes function)
      (validated-closure-result? function))
    (let [cap-dispatch (when (or cap-call typed-cap-call)
                         (fn
@@ -2595,12 +2637,15 @@
               :effects (:effects hir)
               :functions (mapv (fn [function]
                                  (validated-closure-param-indexes function)
+                                 (validated-i64-pair-chain-param-indexes function)
                                  (validated-closure-result? function)
                                  (select-keys function
                                               (cond-> [:name :params :result :effects :body]
                                                 typed-values? (conj :param-types)
                                                 (contains? function :closure-param-indexes)
                                                 (conj :closure-param-indexes)
+                                                (contains? function :i64-pair-chain-param-indexes)
+                                                (conj :i64-pair-chain-param-indexes)
                                                 (contains? function :closure-result?)
                                                 (conj :closure-result?))))
                                (:functions hir))}

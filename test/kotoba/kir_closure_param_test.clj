@@ -17,6 +17,19 @@
      :closure-param-indexes [0]
      :result :i64 :effects #{} :body '(pair-first closure)}]})
 
+(defn- hir-with-pair-chain-consumer [chain-expr]
+  {:format :kotoba.hir/v3
+   :entry 'main
+   :exports ['main]
+   :result :i64
+   :effects #{}
+   :functions
+   [{:name 'main :params [] :param-types [] :result :i64 :effects #{}
+     :body (list 'consume chain-expr)}
+    {:name 'consume :params ['args] :param-types [:i64]
+     :i64-pair-chain-param-indexes [0]
+     :result :i64 :effects #{} :body '(pair-first args)}]})
+
 (deftest lower-preserves-and-executes-closure-parameter-refinements
   (let [lowered (kir/lower (hir-with-consumer '(pair 7 0)))
         consumer (some #(when (= 'consume (:name %)) %) (:functions lowered))
@@ -57,3 +70,41 @@
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo #"invalid-pair-handle"
          (kir/lower (hir-with-consumer '(pair 7 9)))))))
+
+(deftest lower-preserves-and-executes-i64-pair-chain-parameter-refinements
+  (let [lowered (kir/lower
+                 (hir-with-pair-chain-consumer '(pair 7 (pair 8 0))))
+        consumer (some #(when (= 'consume (:name %)) %) (:functions lowered))]
+    (is (= [0] (:i64-pair-chain-param-indexes consumer)))
+    (is (= 7 (kir/execute lowered 'main [])))))
+
+(deftest malformed-i64-pair-chain-parameter-refinements-fail-closed
+  (doseq [indexes [[1] [0 0] [0 -1] ["0"]]]
+    (testing (pr-str indexes)
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"i64 pair-chain parameter indexes are malformed"
+           (kir/lower
+            (assoc-in (hir-with-pair-chain-consumer '(pair 7 0))
+                      [:functions 1 :i64-pair-chain-param-indexes] indexes))))))
+  (testing "pair-chain and closure refinements cannot overlap"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"i64 pair-chain parameter indexes are malformed"
+         (kir/lower
+          (assoc-in (hir-with-pair-chain-consumer '(pair 7 0))
+                    [:functions 1 :closure-param-indexes] [0]))))))
+
+(deftest i64-pair-chain-runtime-shape-is-checked
+  (testing "a scalar cannot masquerade as a pair-chain"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"invalid-pair-handle"
+         (kir/lower (hir-with-pair-chain-consumer 7)))))
+  (testing "the chain must end in zero"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"invalid-pair-handle"
+         (kir/lower (hir-with-pair-chain-consumer '(pair 7 9))))))
+  (testing "the apply ABI admits at most four runtime items"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"i64-pair-chain-limit"
+         (kir/lower
+          (hir-with-pair-chain-consumer
+           '(pair 1 (pair 2 (pair 3 (pair 4 (pair 5 0)))))))))))
