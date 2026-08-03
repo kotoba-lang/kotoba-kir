@@ -299,6 +299,15 @@
                                 f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
                              op)
                   (every? walk args)
+                  ;; f64 comparisons. These DO produce a genuine `:bool`-typed
+                  ;; value, which the `true`/`false` comment above says only a
+                  ;; literal could -- that was written before f64 reached
+                  ;; native. It needs no new representation: the backends emit
+                  ;; the same compare-and-set-flag pair the integer
+                  ;; comparisons already do, into the same 0/1 word.
+                  (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
+                                f64-unordered} op)
+                  (and (= 2 (count args)) (every? walk args))
                   ;; `bool-not` sits beside the option/result cases below for
                   ;; the same reason they do: it stays in
                   ;; `non-string-typed-ops` (the cljs gate shares that set) but
