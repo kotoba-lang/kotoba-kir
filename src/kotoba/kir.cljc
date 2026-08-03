@@ -28,7 +28,7 @@
 ;; `string-byte-length`/`string=?`/`string-concat` (the pre-existing typed
 ;; native slice) PLUS -- as of the first native record increment -- a
 ;; SEALED, ALL-SCALAR (`:i64`/`:bool` fields only, no `:f64`: see
-;; `native-scalar-record-field-types`'s own comment for why f64 is
+;; `native-word-field-types`'s own comment for why f64 is
 ;; deliberately excluded even though it's part of the WASM-track ADR 0043
 ;; this slice models) `record-new`/`record-get` pair used in the one exact
 ;; nested shape `backend/x86-64.cljc`'s and `backend/aarch64.cljc`'s own
@@ -100,7 +100,26 @@
 ;; widen two dimensions in one step" pattern this compiler's own component
 ;; ADR chain (0058/0059) explicitly avoids. Native f64 record fields remain
 ;; a separately-gapped follow-up, not attempted by this increment.
-(def ^:private native-scalar-record-field-types #{:i64 :bool})
+;; Renamed from `native-scalar-record-field-types`: `:string` is not scalar, and
+;; the set is no longer about scalars but about what fits in ONE WORD. The
+;; surrounding `native-scalar-record-type?` / `native-scalar-variant-type?`
+;; names are left as they are only because they are quoted by comments in
+;; kotoba-native and kotoba-verifier.
+;;
+;; `:string` is admissible because a string value on native already IS a
+;; one-word `pair(offset,length)` handle -- the same width as an `:i64` -- so a
+;; field or payload holding one needs no representation the slot machinery does
+;; not already have. Verified by handing both backends a KIR with string fields
+;; and string variant payloads directly, bypassing this gate: all four cases
+;; emit, including projecting the string back out and measuring it.
+;;
+;; `:f64` stays out for the reason the previous comment gave and which has not
+;; changed: `kotoba.compiler.core`'s own f32/f64 gate rejects any f64 on native
+;; independently of records, so admitting it here would silently have to widen
+;; that orthogonal gate too. `:keyword` stays out because the backends have no
+;; keyword representation at all -- handed one directly they throw
+;; IllegalArgumentException, not a diagnosable rejection.
+(def ^:private native-word-field-types #{:i64 :bool :string})
 
 ;; Structural shape check only (`[:record :qualified/kw [[:field :type] ...]]`)
 ;; -- deliberately does not re-derive `kotoba.compiler.frontend`'s own
@@ -113,14 +132,14 @@
        (vector? (nth type 2)) (seq (nth type 2))
        (every? (fn [field]
                  (and (vector? field) (= 2 (count field)) (keyword? (first field))
-                      (contains? native-scalar-record-field-types (second field))))
+                      (contains? native-word-field-types (second field))))
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
 
 ;; ADR 0063: the second native value-representation increment (right after
 ;; ADR 0062's record). A native sealed variant admits the SAME narrow
 ;; per-case payload universe records already admit (`:i64`/`:bool` only, no
-;; `:f64` -- identical reasoning as `native-scalar-record-field-types`'s own
+;; `:f64` -- identical reasoning as `native-word-field-types`'s own
 ;; comment: native f32/f64 is a separate, orthogonal, pre-existing gate this
 ;; increment does not touch). A "tag-only" (unit-like) case is realized
 ;; WITHOUT any new type-system concept: every case still declares a real
@@ -139,7 +158,7 @@
        (vector? (nth type 2)) (seq (nth type 2))
        (every? (fn [case-entry]
                  (and (vector? case-entry) (= 2 (count case-entry)) (keyword? (first case-entry))
-                      (contains? native-scalar-record-field-types (second case-entry))))
+                      (contains? native-word-field-types (second case-entry))))
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
 
