@@ -30,6 +30,15 @@
     (is (= doc (value/document-edn-read "(actor/run [1 2])")))
     (is (= doc (value/document-read (value/document-print doc))))))
 
+(deftest textual-edn-set-roundtrip-is-canonically-ordered
+  (let [doc ["set" [["i64" 1] ["keyword" :ready] ["string" "one"]]]]
+    (is (= "#{1 :ready \"one\"}" (value/document-edn-print doc)))
+    (is (= doc (value/document-edn-read "#{\"one\" 1 :ready}")))
+    (is (= doc (value/document-read (value/document-print doc))))
+    (is (neg? (value/document-compare ["i64" 1] ["string" "one"])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"duplicate set item"
+                          (value/document-edn-read "#{:ready :ready}")))))
+
 (deftest textual-edn-printer-rejects-ambiguous-symbols
   (doseq [item [(symbol "nil") (symbol "true") (symbol "42")
                 (symbol ":keyword") (symbol "#tag")]]
@@ -42,7 +51,6 @@
            ["trailing" "nil true"]
            ["tag" "#inst \"2026-08-03\""]
            ["discard" "#_ nil"]
-           ["set" "#{:a}"]
            ["non-keyword map key" "{\"a\" 1}"]
            ["duplicate map key" "{:a 1 :a 2}"]
            ["missing map value" "{:a}"]

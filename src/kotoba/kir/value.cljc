@@ -927,6 +927,8 @@
             (recur parent (dec remaining))))))
     [parents ranks]))
 
+(declare document-canonical-bytes document-compare)
+
 (defn bounded-document!
   "Validate and rebuild the canonical tagged document tree. Document maps use
   keyword keys sorted by their full textual representation; document values
@@ -982,6 +984,20 @@
                         (throw (ex-info (str "invalid document " tag)
                                         {:phase :value :limit document-container-item-limit})))
                       [tag (mapv #(walk % (inc depth)) payload)])
+                  "set"
+                  (do (when-not (and (vector? payload)
+                                     (<= (count payload) document-container-item-limit))
+                        (throw (ex-info "invalid document set"
+                                        {:phase :value :limit document-container-item-limit})))
+                      (let [items (mapv #(walk % (inc depth)) payload)
+                            canonical (vec (sort document-compare items))]
+                        (when-not (and (= items canonical)
+                                       (every? (fn [[left right]]
+                                                 (neg? (document-compare left right)))
+                                               (partition 2 1 items)))
+                          (throw (ex-info "document set items are duplicate or noncanonical"
+                                          {:phase :value})))
+                        [tag items]))
                   "map"
                   (do (when-not (and (vector? payload)
                                      (<= (count payload) document-container-item-limit)
@@ -1016,7 +1032,7 @@
   n | b t/f | i <decimal> ; | f <i64-bits-decimal> ; |
   s <utf8-len> : <bytes> | k <utf8-len> : <keyword-str-with-colon-bytes> |
   y <utf8-len> : <symbol-bytes> |
-  v <count> : <items...> | l <count> : <items...> |
+  v <count> : <items...> | l <count> : <items...> | e <count> : <items...> |
   m <count> : (K <key-len> : <key-bytes> <item>)*
 
   Keywords (values and map keys) use the full `str` form including the leading
@@ -1063,6 +1079,10 @@
                              (emit-str (str (count (second node))))
                              (emit (int \:))
                              (doseq [item (second node)] (walk item)))
+                  "set" (do (emit (int \e))
+                            (emit-str (str (count (second node))))
+                            (emit (int \:))
+                            (doseq [item (second node)] (walk item)))
                   "map" (do (emit (int \m))
                             (emit-str (str (count (second node))))
                             (emit (int \:))
@@ -1078,6 +1098,27 @@
                   (aset-byte arr i (unchecked-byte (.get out i))))
                 arr)
          :cljs (js/Uint8Array.from out)))))
+
+(defn document-compare
+  "Total order for bounded documents, defined as unsigned lexicographic order
+  of their canonical bytes. Set elements and, in the next profile extension,
+  general map keys share this one host-independent ordering substrate."
+  [left right]
+  (let [left-bytes (document-canonical-bytes left)
+        right-bytes (document-canonical-bytes right)
+        left-count #?(:clj (alength ^bytes left-bytes) :cljs (.-length left-bytes))
+        right-count #?(:clj (alength ^bytes right-bytes) :cljs (.-length right-bytes))
+        common (min left-count right-count)]
+    (loop [index 0]
+      (if (= index common)
+        (compare left-count right-count)
+        (let [left-byte #?(:clj (bit-and (int (aget ^bytes left-bytes index)) 0xff)
+                            :cljs (aget left-bytes index))
+              right-byte #?(:clj (bit-and (int (aget ^bytes right-bytes index)) 0xff)
+                             :cljs (aget right-bytes index))]
+          (if (= left-byte right-byte)
+            (recur (inc index))
+            (compare left-byte right-byte)))))))
 
 (defn document-sha256-hex
   "SHA-256 hex digest of document-canonical-bytes. Host-independent identity
@@ -1219,6 +1260,11 @@
                           (throw (ex-info "document-read list count out of range"
                                           {:phase :value :count n})))
                         ["list" (vec (repeatedly n walk))])
+                  101 (let [n (int (parse-int-decimal (take-until 58)))]
+                        (when (or (neg? n) (> n document-container-item-limit))
+                          (throw (ex-info "document-read set count out of range"
+                                          {:phase :value :count n})))
+                        ["set" (vec (repeatedly n walk))])
                   109 (let [n (int (parse-int-decimal (take-until 58)))]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read map count out of range"
@@ -1309,7 +1355,7 @@
 (defn document-edn-print
   "Deterministic textual EDN for the bounded document profile. The profile is
   deliberately closed to nil, booleans, i64/f64, strings, keywords, symbols,
-  vectors, lists, and keyword-keyed maps; tagged values, sets and reader eval
+  vectors, lists, sets, and keyword-keyed maps; tagged values and reader eval
   have no document representation."
   [value]
   (letfn [(walk [node]
@@ -1324,6 +1370,7 @@
                 "symbol" (document-edn-symbol-text payload)
                 "vector" (str "[" (str/join " " (map walk payload)) "]")
                 "list" (str "(" (str/join " " (map walk payload)) ")")
+                "set" (str "#{" (str/join " " (map walk payload)) "}")
                 "map" (str "{" (str/join
                                   " " (map (fn [[key item]]
                                              (str key " " (walk item))) payload)) "}")
@@ -1334,8 +1381,8 @@
 
 (defn document-edn-read
   "Read one bounded textual EDN form into a document. This is an inert parser:
-  dispatch forms (including tags and discard) and sets are
-  rejected before any host reader or resolver can run."
+  tagged and discard dispatch forms are rejected before any host reader or
+  resolver can run; the sole admitted dispatch prefix is the bounded set `#{`."
   [text]
   (bounded-string! text string-value-byte-limit)
   (let [cursor (volatile! 0)
@@ -1458,7 +1505,22 @@
                                   (when (= (at) \}) (fail "map value missing"))
                                   (recur (conj entries [(second key-node)
                                                         (read-value (inc depth))])))))))
-                \# (fail "dispatch forms are forbidden")
+                \# (do (take-char)
+                        (when-not (= (at) \{) (fail "dispatch forms are forbidden"))
+                        (take-char)
+                        (loop [items []]
+                          (skip)
+                          (if (= (at) \})
+                            (do (take-char)
+                                (let [canonical (vec (sort document-compare items))]
+                                  (when-not (every? (fn [[left right]]
+                                                      (neg? (document-compare left right)))
+                                                    (partition 2 1 canonical))
+                                    (fail "duplicate set item"))
+                                  ["set" canonical]))
+                            (do (when (>= (count items) document-container-item-limit)
+                                  (fail "set item limit exceeded"))
+                                (recur (conj items (read-value (inc depth))))))))
                 \) (fail "unexpected closing delimiter")
                 \] (fail "unexpected closing delimiter")
                 \} (fail "unexpected closing delimiter")

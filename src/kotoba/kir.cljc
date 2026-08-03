@@ -74,7 +74,7 @@
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
      disjoint-set-i64-new disjoint-set-i64-count disjoint-set-i64-union
      document-null document-bool document-i64 document-f64 document-string document-keyword document-symbol
-     document-vector document-list document-map document-count document-kind document-equal? document-contains document-get
+     document-vector document-list document-set document-map document-count document-kind document-equal? document-set-contains? document-contains document-get
      document-vector-at document-list-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
      document-vector-remove
      document-assoc document-dissoc document-merge document-string-value document-keyword-value document-symbol-value
@@ -1977,6 +1977,16 @@
          ["list" (mapv #(value/bounded-document!
                           (eval-expr % env functions fuel heap call-stack cap-call)) args)])
 
+        (= op 'document-set)
+        (let [items (mapv #(value/bounded-document!
+                            (eval-expr % env functions fuel heap call-stack cap-call)) args)
+              canonical (vec (sort value/document-compare items))]
+          (when-not (every? (fn [[left right]]
+                              (neg? (value/document-compare left right)))
+                            (partition 2 1 canonical))
+            (trap! :duplicate-document-set-item {}))
+          (value/bounded-document! ["set" canonical]))
+
         (= op 'document-map)
         (let [entries (mapv (fn [[key-form item-form]]
                               [(value/bounded-typed-value!
@@ -1989,9 +1999,18 @@
         (= op 'document-count)
         (let [[tag payload] (value/bounded-document!
                              (eval-expr (first args) env functions fuel heap call-stack cap-call))]
-          (when-not (contains? #{"map" "vector" "list"} tag)
+          (when-not (contains? #{"map" "vector" "list" "set"} tag)
             (trap! :document-container-required {:tag tag}))
           #?(:clj (long (count payload)) :cljs (i64/->bigint (count payload))))
+
+        (= op 'document-set-contains?)
+        (let [[tag items]
+              (value/bounded-document!
+               (eval-expr (first args) env functions fuel heap call-stack cap-call))
+              item (value/bounded-document!
+                    (eval-expr (second args) env functions fuel heap call-stack cap-call))]
+          (when-not (= "set" tag) (trap! :document-set-required {:tag tag}))
+          (boolean (some #(zero? (value/document-compare % item)) items)))
 
         (contains? '#{document-vector-at document-list-at document-vector-assoc
                       document-vector-conj document-vector-drop document-vector-remove} op)
