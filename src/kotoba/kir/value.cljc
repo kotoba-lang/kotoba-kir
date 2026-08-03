@@ -927,7 +927,7 @@
             (recur parent (dec remaining))))))
     [parents ranks]))
 
-(declare document-canonical-bytes document-compare)
+(declare document-canonical-bytes document-compare document-map-key-compare)
 
 (defn bounded-document!
   "Validate and rebuild the canonical tagged document tree. Document maps use
@@ -1004,16 +1004,22 @@
                                      (every? #(and (vector? %) (= 2 (count %))) payload))
                         (throw (ex-info "invalid document map"
                                         {:phase :value :limit document-container-item-limit})))
-                      (let [keys (mapv first payload)
-                            _ (doseq [key keys]
-                                (bounded-keyword! key keyword-value-byte-limit)
-                                (charge-text! (str key)))
-                            canonical (vec (sort-by (comp str first) payload))]
-                        (when-not (and (= payload canonical)
-                                       (= (count keys) (count (distinct keys))))
+                      (let [entries (mapv (fn [[key item]]
+                                            [(if (keyword? key)
+                                               (walk ["keyword" key] (inc depth))
+                                               (walk key (inc depth)))
+                                             (walk item (inc depth))])
+                                          payload)
+                            canonical (vec (sort (fn [[left] [right]]
+                                                   (document-map-key-compare left right))
+                                                 entries))]
+                        (when-not (and (= entries canonical)
+                                       (every? (fn [[[left] [right]]]
+                                                 (neg? (document-map-key-compare left right)))
+                                               (partition 2 1 entries)))
                           (throw (ex-info "document map keys are duplicate or noncanonical"
                                           {:phase :value})))
-                        [tag (mapv (fn [[key item]] [key (walk item (inc depth))]) payload)]))
+                        [tag entries]))
                   (throw (ex-info "unknown document tag" {:phase :value :tag tag})))))]
       (walk value 0))))
 
@@ -1087,8 +1093,11 @@
                             (emit-str (str (count (second node))))
                             (emit (int \:))
                             (doseq [[k item] (second node)]
-                              (emit (int \K))
-                              (emit-len-str (str k))
+                              (if (= "keyword" (first k))
+                                (do (emit (int \K))
+                                    (emit-len-str (str (second k))))
+                                (do (emit (int \D))
+                                    (walk k)))
                               (walk item)))
                   (throw (ex-info "unknown document tag in canonical encoding"
                                   {:phase :value :tag tag})))))]
@@ -1119,6 +1128,15 @@
           (if (= left-byte right-byte)
             (recur (inc index))
             (compare left-byte right-byte)))))))
+
+(defn document-map-key-compare
+  "Total order for document map keys. Keyword pairs retain the original
+  keyword-text order so existing canonical keyword maps keep byte identity;
+  every other pair uses the canonical document byte order."
+  [left right]
+  (if (and (= "keyword" (first left)) (= "keyword" (first right)))
+    (compare (str (second left)) (str (second right)))
+    (document-compare left right)))
 
 (defn document-sha256-hex
   "SHA-256 hex digest of document-canonical-bytes. Host-independent identity
@@ -1273,16 +1291,19 @@
                          (vec
                           (repeatedly n
                             (fn []
-                              (when-not (= (take-byte) 75) ;; 'K'
-                                (throw (ex-info "document-read map entry missing K"
-                                                {:phase :value})))
-                              (let [k-str (take-len-str)]
-                                (when-not (and (string? k-str)
-                                               (pos? (count k-str))
-                                               (= (first k-str) \:))
-                                  (throw (ex-info "document-read map key must be keyword"
-                                                  {:phase :value :text k-str})))
-                                [(keyword (subs k-str 1)) (walk)]))))])
+                              (let [marker (take-byte)
+                                    key (case marker
+                                          75 (let [k-str (take-len-str)] ;; 'K'
+                                               (when-not (and (string? k-str)
+                                                              (pos? (count k-str))
+                                                              (= (first k-str) \:))
+                                                 (throw (ex-info "document-read map keyword key is invalid"
+                                                                 {:phase :value :text k-str})))
+                                               ["keyword" (keyword (subs k-str 1))])
+                                          68 (walk) ;; 'D'
+                                          (throw (ex-info "document-read map entry has invalid key marker"
+                                                          {:phase :value :marker marker})))]
+                                [key (walk)]))))])
                   (throw (ex-info "document-read unknown tag"
                                   {:phase :value :tag tag})))))]
       (let [doc (walk)]
@@ -1355,7 +1376,7 @@
 (defn document-edn-print
   "Deterministic textual EDN for the bounded document profile. The profile is
   deliberately closed to nil, booleans, i64/f64, strings, keywords, symbols,
-  vectors, lists, sets, and keyword-keyed maps; tagged values and reader eval
+  vectors, lists, sets, and maps with document keys; tagged values and reader eval
   have no document representation."
   [value]
   (letfn [(walk [node]
@@ -1373,7 +1394,7 @@
                 "set" (str "#{" (str/join " " (map walk payload)) "}")
                 "map" (str "{" (str/join
                                   " " (map (fn [[key item]]
-                                             (str key " " (walk item))) payload)) "}")
+                                             (str (walk key) " " (walk item))) payload)) "}")
                 (throw (ex-info "document-edn-print unknown document tag"
                                 {:phase :value :tag tag})))))]
     (let [text (walk (bounded-document! value))]
@@ -1492,18 +1513,20 @@
                           (skip)
                           (if (= (at) \})
                             (do (take-char)
-                                (let [sorted (vec (sort-by (comp str first) entries))]
-                                  (when-not (= (count sorted) (count (distinct (map first sorted))))
+                                (let [sorted (vec (sort (fn [[left] [right]]
+                                                          (document-map-key-compare left right))
+                                                        entries))]
+                                  (when-not (every? (fn [[[left] [right]]]
+                                                      (neg? (document-map-key-compare left right)))
+                                                    (partition 2 1 sorted))
                                     (fail "duplicate map key"))
                                   ["map" sorted]))
                             (do (when (>= (count entries) document-container-item-limit)
                                   (fail "map entry limit exceeded"))
                                 (let [key-node (read-value (inc depth))]
-                                  (when-not (= "keyword" (first key-node))
-                                    (fail "map keys must be keywords"))
                                   (skip)
                                   (when (= (at) \}) (fail "map value missing"))
-                                  (recur (conj entries [(second key-node)
+                                  (recur (conj entries [key-node
                                                         (read-value (inc depth))])))))))
                 \# (do (take-char)
                         (when-not (= (at) \{) (fail "dispatch forms are forbidden"))

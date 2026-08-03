@@ -17,7 +17,8 @@
            printed))
     (is (= (value/bounded-document! document)
            (value/document-edn-read printed)))
-    (is (= ["map" [[:a ["i64" 1]] [:b ["bool" false]]]]
+    (is (= ["map" [[["keyword" :a] ["i64" 1]]
+                    [["keyword" :b] ["bool" false]]]]
            (value/document-edn-read "; bounded policy\n{:b false, :a 1}")))
     (is (= ["symbol" 'actor/run]
            (value/document-edn-read "actor/run")))
@@ -39,6 +40,16 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"duplicate set item"
                           (value/document-edn-read "#{:ready :ready}")))))
 
+(deftest textual-edn-general-map-keys-roundtrip-canonically
+  (let [doc (value/document-edn-read "{[1 2] :pair, \"name\" 7, :ready true}")]
+    (is (= "{:ready true \"name\" 7 [1 2] :pair}"
+           (value/document-edn-print doc)))
+    (is (= doc (value/document-read (value/document-print doc))))
+    (is (= [["keyword" :ready] ["bool" true]]
+           (first (second doc))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"duplicate map key"
+                          (value/document-edn-read "{[1] :a [1] :b}")))))
+
 (deftest textual-edn-printer-rejects-ambiguous-symbols
   (doseq [item [(symbol "nil") (symbol "true") (symbol "42")
                 (symbol ":keyword") (symbol "#tag")]]
@@ -51,7 +62,6 @@
            ["trailing" "nil true"]
            ["tag" "#inst \"2026-08-03\""]
            ["discard" "#_ nil"]
-           ["non-keyword map key" "{\"a\" 1}"]
            ["duplicate map key" "{:a 1 :a 2}"]
            ["missing map value" "{:a}"]
            ["i64 overflow" "9223372036854775808"]
