@@ -135,3 +135,39 @@
                                                 :result :i64 :effects #{[:cap/call 1]}
                                                 :body '(cap-call 1 0)}]})))
       "an effectful entry still gets no oracle"))
+
+;; ---------------------------------------------------------------------------
+;; bool-not decodes the 0/1 word, not Clojure truthiness
+;; ---------------------------------------------------------------------------
+
+(defn- run [body]
+  (kir/execute (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                           :result :i64 :effects #{}
+                           :functions [{:name 'main :params [] :param-types []
+                                        :result :i64 :effects #{} :body body}]})
+               'main []))
+
+(deftest bool-not-inverts-a-comparison
+  ;; It used to be `(not value)`. Comparisons evaluate to the WORD 0/1, and 0 is
+  ;; truthy in Clojure, so `(not 0)` and `(not 1)` were both false -- bool-not
+  ;; returned false for EVERY input, making `(bool-not (= a b))` constantly
+  ;; false. This interpreter is the oracle the other targets are checked
+  ;; against, so that was the language's definition of the operation.
+  (is (= 1 (run '(if (bool-not (= 1 2)) 1 0))) "not(1 = 2) must be true")
+  (is (= 0 (run '(if (bool-not (= 1 1)) 1 0))) "not(1 = 1) must be false")
+  (is (= 1 (run '(if (bool-not (< 2 1)) 1 0))))
+  (is (= 0 (run '(if (bool-not (< 1 2)) 1 0)))))
+
+(deftest bool-not-accepts-both-internal-bool-representations
+  ;; 38d1bd0 leaves both the 0/1 word and a host boolean acceptable inside a
+  ;; module, so the decoding must handle each. `option-some?` yields a real
+  ;; boolean while a comparison yields a word.
+  (is (= 0 (run '(if (bool-not (option-some? (option-some 1))) 1 0))))
+  (is (= 1 (run '(if (bool-not (option-some? (option-none))) 1 0)))))
+
+(deftest bool-not-is-an-involution
+  ;; The property that fails loudest under the old behaviour: double negation
+  ;; used to collapse to a constant instead of returning the original truth.
+  (doseq [[inner expected] [['(= 1 1) 1] ['(= 1 2) 0]]]
+    (is (= expected (run (list 'if (list 'bool-not (list 'bool-not inner)) 1 0)))
+        (str "bool-not twice over " inner " must round-trip"))))
