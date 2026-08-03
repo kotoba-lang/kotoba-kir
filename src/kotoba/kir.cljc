@@ -74,8 +74,8 @@
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
      disjoint-set-i64-new disjoint-set-i64-count disjoint-set-i64-union
      document-null document-bool document-i64 document-f64 document-string document-keyword document-symbol
-     document-vector document-map document-count document-kind document-equal? document-contains document-get
-     document-vector-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
+     document-vector document-list document-map document-count document-kind document-equal? document-contains document-get
+     document-vector-at document-list-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
      document-vector-remove
      document-assoc document-dissoc document-merge document-string-value document-keyword-value document-symbol-value
      document-bool-value document-i64-value document-f64-value document-sha256 document-print document-read
@@ -1972,6 +1972,11 @@
          ["vector" (mapv #(value/bounded-document!
                             (eval-expr % env functions fuel heap call-stack cap-call)) args)])
 
+        (= op 'document-list)
+        (value/bounded-document!
+         ["list" (mapv #(value/bounded-document!
+                          (eval-expr % env functions fuel heap call-stack cap-call)) args)])
+
         (= op 'document-map)
         (let [entries (mapv (fn [[key-form item-form]]
                               [(value/bounded-typed-value!
@@ -1984,19 +1989,28 @@
         (= op 'document-count)
         (let [[tag payload] (value/bounded-document!
                              (eval-expr (first args) env functions fuel heap call-stack cap-call))]
-          (when-not (contains? #{"map" "vector"} tag)
+          (when-not (contains? #{"map" "vector" "list"} tag)
             (trap! :document-container-required {:tag tag}))
           #?(:clj (long (count payload)) :cljs (i64/->bigint (count payload))))
 
-        (contains? '#{document-vector-at document-vector-assoc
+        (contains? '#{document-vector-at document-list-at document-vector-assoc
                       document-vector-conj document-vector-drop document-vector-remove} op)
         (let [[document-form index-or-item-form item-form] args
               [tag items]
               (value/bounded-document!
                (eval-expr document-form env functions fuel heap call-stack cap-call))
-              _ (when-not (= "vector" tag) (trap! :document-vector-required {:tag tag}))]
+              expected-tag (if (= op 'document-list-at) "list" "vector")
+              _ (when-not (= expected-tag tag)
+                  (trap! (if (= expected-tag "list") :document-list-required :document-vector-required)
+                         {:tag tag}))]
           (case op
             document-vector-at
+            (let [index (value/bounded-typed-value!
+                         :i64 (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
+              (if (and (not (neg? index)) (< index (count items)))
+                [[:option :document] true (nth items index)]
+                [[:option :document] false]))
+            document-list-at
             (let [index (value/bounded-typed-value!
                          :i64 (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
               (if (and (not (neg? index)) (< index (count items)))
