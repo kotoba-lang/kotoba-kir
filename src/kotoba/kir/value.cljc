@@ -976,10 +976,10 @@
                                       (charge-text! (str payload)) payload)]
                   "symbol" [tag (do (bounded-symbol! payload symbol-value-byte-limit)
                                      (charge-text! (str payload)) payload)]
-                  "vector"
+                  ("vector" "list")
                   (do (when-not (and (vector? payload)
                                      (<= (count payload) document-container-item-limit))
-                        (throw (ex-info "invalid document vector"
+                        (throw (ex-info (str "invalid document " tag)
                                         {:phase :value :limit document-container-item-limit})))
                       [tag (mapv #(walk % (inc depth)) payload)])
                   "map"
@@ -1016,7 +1016,8 @@
   n | b t/f | i <decimal> ; | f <i64-bits-decimal> ; |
   s <utf8-len> : <bytes> | k <utf8-len> : <keyword-str-with-colon-bytes> |
   y <utf8-len> : <symbol-bytes> |
-  v <count> : <items...> | m <count> : (K <key-len> : <key-bytes> <item>)*
+  v <count> : <items...> | l <count> : <items...> |
+  m <count> : (K <key-len> : <key-bytes> <item>)*
 
   Keywords (values and map keys) use the full `str` form including the leading
   colon (e.g. \":tag\"). Map keys are tagged with capital K to distinguish them
@@ -1058,6 +1059,10 @@
                                (emit-str (str (count (second node))))
                                (emit (int \:))
                                (doseq [item (second node)] (walk item)))
+                  "list" (do (emit (int \l))
+                             (emit-str (str (count (second node))))
+                             (emit (int \:))
+                             (doseq [item (second node)] (walk item)))
                   "map" (do (emit (int \m))
                             (emit-str (str (count (second node))))
                             (emit (int \:))
@@ -1209,6 +1214,11 @@
                           (throw (ex-info "document-read vector count out of range"
                                           {:phase :value :count n})))
                         ["vector" (vec (repeatedly n walk))])
+                  108 (let [n (int (parse-int-decimal (take-until 58)))]
+                        (when (or (neg? n) (> n document-container-item-limit))
+                          (throw (ex-info "document-read list count out of range"
+                                          {:phase :value :count n})))
+                        ["list" (vec (repeatedly n walk))])
                   109 (let [n (int (parse-int-decimal (take-until 58)))]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read map count out of range"
@@ -1299,7 +1309,7 @@
 (defn document-edn-print
   "Deterministic textual EDN for the bounded document profile. The profile is
   deliberately closed to nil, booleans, i64/f64, strings, keywords, symbols,
-  vectors, and keyword-keyed maps; tagged values, sets, lists and reader eval
+  vectors, lists, and keyword-keyed maps; tagged values, sets and reader eval
   have no document representation."
   [value]
   (letfn [(walk [node]
@@ -1313,6 +1323,7 @@
                 "keyword" (str payload)
                 "symbol" (document-edn-symbol-text payload)
                 "vector" (str "[" (str/join " " (map walk payload)) "]")
+                "list" (str "(" (str/join " " (map walk payload)) ")")
                 "map" (str "{" (str/join
                                   " " (map (fn [[key item]]
                                              (str key " " (walk item))) payload)) "}")
@@ -1323,7 +1334,7 @@
 
 (defn document-edn-read
   "Read one bounded textual EDN form into a document. This is an inert parser:
-  dispatch forms (including tags and discard), lists and sets are
+  dispatch forms (including tags and discard) and sets are
   rejected before any host reader or resolver can run."
   [text]
   (bounded-string! text string-value-byte-limit)
@@ -1421,6 +1432,14 @@
                             (do (when (>= (count items) document-container-item-limit)
                                   (fail "vector item limit exceeded"))
                                 (recur (conj items (read-value (inc depth))))))))
+                \( (do (take-char)
+                        (loop [items []]
+                          (skip)
+                          (if (= (at) \))
+                            (do (take-char) ["list" items])
+                            (do (when (>= (count items) document-container-item-limit)
+                                  (fail "list item limit exceeded"))
+                                (recur (conj items (read-value (inc depth))))))))
                 \{ (do (take-char)
                         (loop [entries []]
                           (skip)
@@ -1440,7 +1459,6 @@
                                   (recur (conj entries [(second key-node)
                                                         (read-value (inc depth))])))))))
                 \# (fail "dispatch forms are forbidden")
-                \( (fail "lists are unsupported")
                 \) (fail "unexpected closing delimiter")
                 \] (fail "unexpected closing delimiter")
                 \} (fail "unexpected closing delimiter")
