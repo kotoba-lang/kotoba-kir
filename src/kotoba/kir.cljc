@@ -170,7 +170,11 @@
        (vector? (nth type 2)) (seq (nth type 2))
        (every? (fn [case-entry]
                  (and (vector? case-entry) (= 2 (count case-entry)) (keyword? (first case-entry))
-                      (contains? native-word-field-types (second case-entry))))
+                      ;; A case payload may itself be a record: the backends
+                      ;; flatten it into the dispatch's own payload slots, and
+                      ;; size that region by the widest declared case.
+                      (or (contains? native-word-field-types (second case-entry))
+                          (native-scalar-record-type? (second case-entry)))))
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
 
