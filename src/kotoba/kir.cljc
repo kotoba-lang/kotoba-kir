@@ -1989,12 +1989,15 @@
 
         (= op 'document-map)
         (let [entries (mapv (fn [[key-form item-form]]
-                              [(value/bounded-typed-value!
-                                :keyword (eval-expr key-form env functions fuel heap call-stack cap-call))
+                              [(let [key (eval-expr key-form env functions fuel heap call-stack cap-call)]
+                                 (if (keyword? key)
+                                   ["keyword" (value/bounded-typed-value! :keyword key)]
+                                   (value/bounded-document! key)))
                                (value/bounded-document!
                                 (eval-expr item-form env functions fuel heap call-stack cap-call))])
                             (partition 2 args))]
-          (value/bounded-document! ["map" (vec (sort-by (comp str first) entries))]))
+          (value/bounded-document!
+           ["map" (vec (sort (fn [[left] [right]] (value/document-map-key-compare left right)) entries))]))
 
         (= op 'document-count)
         (let [[tag payload] (value/bounded-document!
@@ -2074,7 +2077,7 @@
           (if (and (not (neg? index)) (< index (count entries)))
             (let [[key item] (nth entries index)]
               [[:option :document] true
-               (value/bounded-document! ["vector" [["keyword" key] item]])])
+               (value/bounded-document! ["vector" [key item]])])
             [[:option :document] false]))
 
         (= op 'document-kind)
@@ -2119,9 +2122,12 @@
               (value/bounded-document!
                (eval-expr document-form env functions fuel heap call-stack cap-call))
               _ (when-not (= "map" tag) (trap! :document-map-required {:tag tag}))
-              key (value/bounded-typed-value!
-                   :keyword (eval-expr key-form env functions fuel heap call-stack cap-call))
-              position (first (keep-indexed #(when (= key (first %2)) %1) entries))]
+              raw-key (eval-expr key-form env functions fuel heap call-stack cap-call)
+              key (if (keyword? raw-key)
+                    ["keyword" (value/bounded-typed-value! :keyword raw-key)]
+                    (value/bounded-document! raw-key))
+              position (first (keep-indexed #(when (zero? (value/document-map-key-compare key (first %2))) %1)
+                                            entries))]
           (case op
             document-contains (boolean (some? position))
             document-get (if (some? position)
@@ -2141,16 +2147,26 @@
               (when (> (count output) value/document-container-item-limit)
                 (trap! :document-map-too-large
                        {:limit value/document-container-item-limit}))
-              (value/bounded-document! ["map" (vec (sort-by (comp str first) output))]))))
+              (value/bounded-document!
+               ["map" (vec (sort (fn [[left] [right]]
+                                    (value/document-map-key-compare left right)) output))]))))
 
         (= op 'document-merge)
         (let [documents (mapv #(value/bounded-document!
                                 (eval-expr % env functions fuel heap call-stack cap-call)) args)
               _ (doseq [[tag _] documents]
                   (when-not (= "map" tag) (trap! :document-map-required {:tag tag})))
-              entries (reduce (fn [result [key item]] (assoc result key item))
-                              (sorted-map-by #(compare (str %1) (str %2)))
-                              (mapcat second documents))]
+              entries (reduce (fn [result [key item]]
+                                (let [position (first
+                                                (keep-indexed
+                                                 #(when (zero? (value/document-map-key-compare key (first %2))) %1)
+                                                 result))]
+                                  (if (some? position)
+                                    (assoc result position [key item])
+                                    (conj result [key item]))))
+                              [] (mapcat second documents))
+              entries (vec (sort (fn [[left] [right]]
+                                   (value/document-map-key-compare left right)) entries))]
           (when (> (count entries) value/document-container-item-limit)
             (trap! :document-map-too-large {:limit value/document-container-item-limit}))
           (value/bounded-document! ["map" (mapv vec entries)]))
