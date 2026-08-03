@@ -1126,8 +1126,8 @@
 
 (defn document-compare
   "Total order for bounded documents, defined as unsigned lexicographic order
-  of their canonical bytes. Set elements and, in the next profile extension,
-  general map keys share this one host-independent ordering substrate."
+  of their canonical bytes. Set elements and general map keys share this one
+  host-independent ordering substrate."
   [left right]
   (let [left-bytes (document-canonical-bytes left)
         right-bytes (document-canonical-bytes right)
@@ -1168,10 +1168,11 @@
   [bytes]
   #?(:clj (let [^bytes arr bytes]
             (apply str (map #(format "%02x" (bit-and (int %) 0xff)) arr)))
-     :cljs (apply str (map (fn [b]
-                             (let [h (.toString (bit-and b 255) 16)]
+     :cljs (apply str (map (fn [index]
+                             (let [b (aget bytes index)
+                                   h (.toString (bit-and b 255) 16)]
                                (if (< (count h) 2) (str "0" h) h)))
-                           bytes))))
+                           (range (.-length bytes))))))
 
 (defn- hex->bytes!
   "Decode a lowercase hex string into a JVM byte-array (or cljs Uint8Array)."
