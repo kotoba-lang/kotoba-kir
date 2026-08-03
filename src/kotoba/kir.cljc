@@ -414,9 +414,23 @@
                   (and (not (contains? non-string-typed-ops op))
                        (every? walk args))))
               :else true))]
-    (every? (fn [{:keys [param-types result body]}]
+    (every? (fn [{:keys [param-types result body name]}]
               (and (every? #{:i64 :string} param-types)
-                   (contains? #{:i64 :string} result)
+                   ;; An INTERNAL function may also RETURN a record. It crosses
+                   ;; the boundary boxed as a pair chain -- one word, built from
+                   ;; the arena primitives this backend has always had -- which
+                   ;; is the one shape flattening cannot reach, since a record is
+                   ;; N slots and a function returns one word.
+                   ;;
+                   ;; The ENTRY is excluded: its result leaves the target for the
+                   ;; host, which has no way to read a pair handle. That is the
+                   ;; same split `kotoba.verifier` draws between its
+                   ;; entry-result-types and function-result-types, and a
+                   ;; deliberate negative in the compiler's own frontend
+                   ;; extensions test pins it.
+                   (or (contains? #{:i64 :string} result)
+                       (and (not= name (:entry hir))
+                            (native-scalar-record-type? result)))
                    (walk body)))
             (:functions hir))))
 
