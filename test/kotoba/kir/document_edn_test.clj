@@ -8,16 +8,20 @@
     [:goal ["string" "言葉\n移行"]]
     [:ratio ["f64" 1.5]]
     [:ready ["bool" true]]
-    [:steps ["vector" [["null"] ["keyword" :actor/run]]]]]])
+    [:steps ["vector" [["null"] ["keyword" :actor/run] ["symbol" 'worker/step]]]]]])
 
 (deftest bounded-document-textual-edn-roundtrip
   (let [printed (value/document-edn-print document)]
-    (is (= "{:attempt -7 :goal \"言葉\\n移行\" :ratio 1.5 :ready true :steps [nil :actor/run]}"
+    (is (= "{:attempt -7 :goal \"言葉\\n移行\" :ratio 1.5 :ready true :steps [nil :actor/run worker/step]}"
            printed))
     (is (= (value/bounded-document! document)
            (value/document-edn-read printed)))
     (is (= ["map" [[:a ["i64" 1]] [:b ["bool" false]]]]
-           (value/document-edn-read "; bounded policy\n{:b false, :a 1}")))))
+           (value/document-edn-read "; bounded policy\n{:b false, :a 1}")))
+    (is (= ["symbol" 'actor/run]
+           (value/document-edn-read "actor/run")))
+    (is (= ["symbol" 'actor/run]
+           (value/document-read (value/document-print ["symbol" 'actor/run]))))))
 
 (deftest textual-edn-reader-fails-closed
   (doseq [[label input]
@@ -27,7 +31,6 @@
            ["discard" "#_ nil"]
            ["set" "#{:a}"]
            ["list" "(1 2)"]
-           ["symbol" "ambient/name"]
            ["non-keyword map key" "{\"a\" 1}"]
            ["duplicate map key" "{:a 1 :a 2}"]
            ["missing map value" "{:a}"]

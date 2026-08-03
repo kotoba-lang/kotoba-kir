@@ -974,6 +974,8 @@
                                      (charge-text! payload) payload)]
                   "keyword" [tag (do (bounded-keyword! payload keyword-value-byte-limit)
                                       (charge-text! (str payload)) payload)]
+                  "symbol" [tag (do (bounded-symbol! payload symbol-value-byte-limit)
+                                     (charge-text! (str payload)) payload)]
                   "vector"
                   (do (when-not (and (vector? payload)
                                      (<= (count payload) document-container-item-limit))
@@ -1013,6 +1015,7 @@
   "Deterministic UTF-8 identity encoding of a validated document. Format:
   n | b t/f | i <decimal> ; | f <i64-bits-decimal> ; |
   s <utf8-len> : <bytes> | k <utf8-len> : <keyword-str-with-colon-bytes> |
+  y <utf8-len> : <symbol-bytes> |
   v <count> : <items...> | m <count> : (K <key-len> : <key-bytes> <item>)*
 
   Keywords (values and map keys) use the full `str` form including the leading
@@ -1049,6 +1052,8 @@
                                (emit-len-str (second node)))
                   "keyword" (do (emit (int \k))
                                 (emit-len-str (str (second node))))
+                  "symbol" (do (emit (int \y))
+                               (emit-len-str (str (second node))))
                   "vector" (do (emit (int \v))
                                (emit-str (str (count (second node))))
                                (emit (int \:))
@@ -1198,6 +1203,7 @@
                           (throw (ex-info "document-read keyword must start with colon"
                                           {:phase :value :text kw-str})))
                         ["keyword" (keyword (subs kw-str 1))])
+                  121 ["symbol" (symbol (take-len-str))]
                   118 (let [n (int (parse-int-decimal (take-until 58)))]
                         (when (or (neg? n) (> n document-container-item-limit))
                           (throw (ex-info "document-read vector count out of range"
@@ -1280,8 +1286,8 @@
 
 (defn document-edn-print
   "Deterministic textual EDN for the bounded document profile. The profile is
-  deliberately closed to nil, booleans, i64/f64, strings, keywords, vectors,
-  and keyword-keyed maps; tagged values, sets, lists, symbols and reader eval
+  deliberately closed to nil, booleans, i64/f64, strings, keywords, symbols,
+  vectors, and keyword-keyed maps; tagged values, sets, lists and reader eval
   have no document representation."
   [value]
   (letfn [(walk [node]
@@ -1293,6 +1299,7 @@
                 "f64" (document-edn-f64-text payload)
                 "string" (document-edn-escape-string payload)
                 "keyword" (str payload)
+                "symbol" (str payload)
                 "vector" (str "[" (str/join " " (map walk payload)) "]")
                 "map" (str "{" (str/join
                                   " " (map (fn [[key item]]
@@ -1304,7 +1311,7 @@
 
 (defn document-edn-read
   "Read one bounded textual EDN form into a document. This is an inert parser:
-  dispatch forms (including tags and discard), lists, sets and symbols are
+  dispatch forms (including tags and discard), lists and sets are
   rejected before any host reader or resolver can run."
   [text]
   (bounded-string! text string-value-byte-limit)
@@ -1386,7 +1393,8 @@
                   (parse-f64 token)
                   (and (.startsWith token ":") (> (count token) 1))
                   ["keyword" (bounded-keyword! (keyword (subs token 1)) keyword-value-byte-limit)]
-                  :else (fail "unsupported token"))))
+                  (.startsWith token ":") (fail "invalid keyword")
+                  :else ["symbol" (bounded-symbol! (symbol token) symbol-value-byte-limit)])))
             (read-value [depth]
               (when (> depth document-depth-limit) (fail "depth limit exceeded"))
               (skip)
