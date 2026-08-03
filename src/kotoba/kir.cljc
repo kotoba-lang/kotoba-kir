@@ -260,6 +260,15 @@
                                 f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
                              op)
                   (every? walk args)
+                  ;; `bool-not` sits beside the option/result cases below for
+                  ;; the same reason they do: it stays in
+                  ;; `non-string-typed-ops` (the cljs gate shares that set) but
+                  ;; the native backends now emit it, as a test-against-zero
+                  ;; and setcc -- the very sequence every comparison there
+                  ;; already produces. It needs no representation the one-word
+                  ;; slice does not already have.
+                  (= op 'bool-not)
+                  (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-some)
                   (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-none)
