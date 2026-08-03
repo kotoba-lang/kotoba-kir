@@ -79,6 +79,7 @@
      document-vector-remove
      document-assoc document-dissoc document-merge document-string-value document-keyword-value
      document-bool-value document-i64-value document-f64-value document-sha256 document-print document-read
+     document-edn-print document-edn-read
      i32-wrap u32-wrap i32-wrapping-add i32-wrapping-mul i32-xor
      i32-shift-left i32-shift-right u32-shift-right xorshift32
      bit-or bit-not i64-shift-left i64-shift-right u64-shift-right
@@ -2065,6 +2066,16 @@
 
         (= op 'document-read)
         (value/document-read
+         (value/bounded-string!
+          (eval-expr (first args) env functions fuel heap call-stack cap-call)
+          value/string-value-byte-limit))
+
+        (= op 'document-edn-print)
+        (value/document-edn-print
+         (eval-expr (first args) env functions fuel heap call-stack cap-call))
+
+        (= op 'document-edn-read)
+        (value/document-edn-read
          (value/bounded-string!
           (eval-expr (first args) env functions fuel heap call-stack cap-call)
           value/string-value-byte-limit))

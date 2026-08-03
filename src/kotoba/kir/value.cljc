@@ -1,7 +1,8 @@
 (ns kotoba.kir.value
+  (:require [clojure.string :as str]
+            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
-                   [java.security MessageDigest])
-     :cljs (:require [kotoba.kir.cljs-i64 :as i64])))
+                   [java.security MessageDigest])))
 
 (def string-literal-byte-limit 4096)
 (def string-value-byte-limit 65536)
@@ -1250,6 +1251,185 @@
     (throw (ex-info "document-read string exceeds byte limit"
                     {:phase :value :limit string-value-byte-limit})))
   (bounded-document! (document-from-canonical-bytes! (hex->bytes! s))))
+
+(defn- document-edn-escape-string [s]
+  (bounded-string! s string-value-byte-limit)
+  (let [out (volatile! ["\""])]
+    (dotimes [index (count s)]
+      (let [unit #?(:clj (int (.charAt ^String s index))
+                    :cljs (.charCodeAt s index))]
+        (vswap! out conj
+                (case unit
+                  8 "\\b" 9 "\\t" 10 "\\n" 12 "\\f" 13 "\\r"
+                  34 "\\\"" 92 "\\\\"
+                  (if (< unit 32)
+                    (let [hex #?(:clj (Integer/toHexString unit)
+                                 :cljs (.toString unit 16))]
+                      (str "\\u" (apply str (repeat (- 4 (count hex)) "0")) hex))
+                    #?(:clj (str (.charAt ^String s index))
+                       :cljs (.charAt s index)))))))
+    (apply str (conj @out "\""))))
+
+(defn- document-edn-f64-text [n]
+  (when-not (and (f64-value? n)
+                 #?(:clj (Double/isFinite ^double n) :cljs (js/Number.isFinite n)))
+    (throw (ex-info "document-edn-print rejects non-finite f64" {:phase :value})))
+  (let [text #?(:clj (Double/toString ^double n) :cljs (.toString n))]
+    ;; EDN must retain a floating marker so integral doubles do not decode as i64.
+    (if (or (some #{\. \e \E} text)) text (str text ".0"))))
+
+(defn document-edn-print
+  "Deterministic textual EDN for the bounded document profile. The profile is
+  deliberately closed to nil, booleans, i64/f64, strings, keywords, vectors,
+  and keyword-keyed maps; tagged values, sets, lists, symbols and reader eval
+  have no document representation."
+  [value]
+  (letfn [(walk [node]
+            (let [[tag payload] node]
+              (case tag
+                "null" "nil"
+                "bool" (if payload "true" "false")
+                "i64" (str payload)
+                "f64" (document-edn-f64-text payload)
+                "string" (document-edn-escape-string payload)
+                "keyword" (str payload)
+                "vector" (str "[" (str/join " " (map walk payload)) "]")
+                "map" (str "{" (str/join
+                                  " " (map (fn [[key item]]
+                                             (str key " " (walk item))) payload)) "}")
+                (throw (ex-info "document-edn-print unknown document tag"
+                                {:phase :value :tag tag})))))]
+    (let [text (walk (bounded-document! value))]
+      (bounded-string! text string-value-byte-limit))))
+
+(defn document-edn-read
+  "Read one bounded textual EDN form into a document. This is an inert parser:
+  dispatch forms (including tags and discard), lists, sets and symbols are
+  rejected before any host reader or resolver can run."
+  [text]
+  (bounded-string! text string-value-byte-limit)
+  (let [cursor (volatile! 0)
+        length (count text)]
+    (letfn [(fail [message]
+              (throw (ex-info (str "document-edn-read " message)
+                              {:phase :value :offset @cursor})))
+            (at [] (when (< @cursor length)
+                     #?(:clj (.charAt ^String text @cursor)
+                        :cljs (.charAt text @cursor))))
+            (take-char [] (let [ch (at)] (vswap! cursor inc) ch))
+            (space? [ch] (contains? #{\space \tab \newline \return \,} ch))
+            (delimiter? [ch]
+              (or (nil? ch) (space? ch) (contains? #{\[ \] \{ \} \( \) \" \;} ch)))
+            (skip []
+              (loop []
+                (cond
+                  (space? (at)) (do (vswap! cursor inc) (recur))
+                  (= (at) \;) (do (loop []
+                                      (when (and (< @cursor length)
+                                                 (not= (take-char) \newline))
+                                        (recur)))
+                                    (recur)))))
+            (hex-unit []
+              (when (> (+ @cursor 4) length) (fail "truncated unicode escape"))
+              (let [raw (subs text @cursor (+ @cursor 4))]
+                (when-not (re-matches #"[0-9A-Fa-f]{4}" raw)
+                  (fail "invalid unicode escape"))
+                (vswap! cursor + 4)
+                #?(:clj (char (Integer/parseInt raw 16))
+                   :cljs (js/String.fromCharCode (js/parseInt raw 16)))))
+            (read-quoted []
+              (take-char)
+              (let [parts (volatile! [])]
+                (loop []
+                  (let [ch (take-char)]
+                    (cond
+                      (nil? ch) (fail "unterminated string")
+                      (= ch \newline) (fail "newline in string")
+                      (= ch \return) (fail "newline in string")
+                      (= ch \") (apply str @parts)
+                      (= ch \\)
+                      (let [escaped (take-char)]
+                        (vswap! parts conj
+                                (case escaped
+                                  \b "\b" \t "\t" \n "\n" \f "\f" \r "\r"
+                                  \" "\"" \\ "\\" \u (str (hex-unit))
+                                  (fail "unsupported string escape")))
+                        (recur))
+                      :else (do (vswap! parts conj (str ch)) (recur)))))))
+            (read-token []
+              (let [start @cursor]
+                (loop []
+                  (when-not (delimiter? (at)) (vswap! cursor inc) (recur)))
+                (when (= start @cursor) (fail "expected token"))
+                (subs text start @cursor)))
+            (parse-i64 [token]
+              (try
+                (let [n #?(:clj (Long/parseLong token) :cljs (js/BigInt token))]
+                  ["i64" n])
+                (catch #?(:clj Exception :cljs :default) _ (fail "i64 out of range"))))
+            (parse-f64 [token]
+              (let [n #?(:clj (try (Double/parseDouble token) (catch Exception _ nil))
+                         :cljs (js/Number token))]
+                (when-not (and (some? n)
+                               #?(:clj (Double/isFinite ^double n)
+                                  :cljs (js/Number.isFinite n)))
+                  (fail "invalid or non-finite f64"))
+                ["f64" n]))
+            (parse-token []
+              (let [token (read-token)]
+                (cond
+                  (= token "nil") ["null"]
+                  (= token "true") ["bool" true]
+                  (= token "false") ["bool" false]
+                  (re-matches #"[+-]?[0-9]+" token) (parse-i64 token)
+                  (re-matches #"[+-]?(?:(?:[0-9]+\.[0-9]*)|(?:[0-9]*\.[0-9]+)|(?:[0-9]+[eE][+-]?[0-9]+))(?:[eE][+-]?[0-9]+)?" token)
+                  (parse-f64 token)
+                  (and (.startsWith token ":") (> (count token) 1))
+                  ["keyword" (bounded-keyword! (keyword (subs token 1)) keyword-value-byte-limit)]
+                  :else (fail "unsupported token"))))
+            (read-value [depth]
+              (when (> depth document-depth-limit) (fail "depth limit exceeded"))
+              (skip)
+              (case (at)
+                nil (fail "unexpected end of input")
+                \" ["string" (read-quoted)]
+                \[ (do (take-char)
+                        (loop [items []]
+                          (skip)
+                          (if (= (at) \])
+                            (do (take-char) ["vector" items])
+                            (do (when (>= (count items) document-container-item-limit)
+                                  (fail "vector item limit exceeded"))
+                                (recur (conj items (read-value (inc depth))))))))
+                \{ (do (take-char)
+                        (loop [entries []]
+                          (skip)
+                          (if (= (at) \})
+                            (do (take-char)
+                                (let [sorted (vec (sort-by (comp str first) entries))]
+                                  (when-not (= (count sorted) (count (distinct (map first sorted))))
+                                    (fail "duplicate map key"))
+                                  ["map" sorted]))
+                            (do (when (>= (count entries) document-container-item-limit)
+                                  (fail "map entry limit exceeded"))
+                                (let [key-node (read-value (inc depth))]
+                                  (when-not (= "keyword" (first key-node))
+                                    (fail "map keys must be keywords"))
+                                  (skip)
+                                  (when (= (at) \}) (fail "map value missing"))
+                                  (recur (conj entries [(second key-node)
+                                                        (read-value (inc depth))])))))))
+                \# (fail "dispatch forms are forbidden")
+                \( (fail "lists are unsupported")
+                \) (fail "unexpected closing delimiter")
+                \] (fail "unexpected closing delimiter")
+                \} (fail "unexpected closing delimiter")
+                (parse-token)))]
+      (skip)
+      (let [document (read-value 0)]
+        (skip)
+        (when (< @cursor length) (fail "trailing forms"))
+        (bounded-document! document)))))
 
 (def ^:private leaf-value-types
   #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :option-i64 :result-i64
