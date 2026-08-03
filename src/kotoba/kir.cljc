@@ -61,6 +61,7 @@
      result-ok-of result-err-of result-ok?-of result-value-of result-error-of result-match-of
      variant-new variant-match
      option-some-of option-none-of option-some?-of option-value-of option-match
+     typed-list-new
      hetero-vector-new hetero-vector-count hetero-vector-at hetero-vector-assoc hetero-vector-equal
      typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal typed-set-nth
      typed-map-new typed-map-count typed-map-contains typed-map-get
@@ -1791,6 +1792,12 @@
                           item-forms)]
           (value/bounded-typed-value! type (into [type] items)))
 
+        (= op 'typed-list-new)
+        (let [[type & item-forms] args
+              items (mapv #(eval-expr % env functions fuel heap call-stack cap-call)
+                          item-forms)]
+          (value/bounded-typed-value! type [type items]))
+
         (= op 'hetero-vector-count)
         (let [[type value-form] args
               items (value/bounded-typed-value!
@@ -2011,8 +2018,11 @@
          (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args))
 
         (= op 'vector-count)
-        (let [items (value/bounded-vector-i64!
-                     (eval-expr (first args) env functions fuel heap call-stack cap-call))]
+        (let [value (eval-expr (first args) env functions fuel heap call-stack cap-call)
+              items (if (and (vector? value) (= 2 (count value))
+                             (vector? (first value)) (= :list (ffirst value)))
+                      (second (value/bounded-typed-value! (first value) value))
+                      (value/bounded-vector-i64! value))]
           #?(:clj (long (count items)) :cljs (i64/->bigint (count items))))
 
         (= op 'vector-get)
