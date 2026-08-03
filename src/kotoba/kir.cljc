@@ -305,6 +305,38 @@
                          (native-word-value-type? type)
                          (symbol? ok-binder) (symbol? err-binder)
                          (walk value) (walk ok-body) (walk err-body)))
+                  ;; `let` MUST be walked explicitly. Without this case it fell
+                  ;; to `:else`, which walks `args` -- and the first arg is the
+                  ;; binding VECTOR, which is not `seq?` (vectors never are),
+                  ;; so it reached the terminal `:else true` and its binding
+                  ;; values were never inspected at all. The result was that
+                  ;; the identical operation was gated when written directly
+                  ;; and admitted when bound by a `let`:
+                  ;;
+                  ;;   (u32-wrap 1)            -> rejected, :phase :target
+                  ;;   (let [a (u32-wrap 1)] a) -> admitted, reached the backend
+                  ;;
+                  ;; Only the f32/f64 families escaped, because
+                  ;; `uses-f32?`/`uses-f64?` scan the whole tree separately.
+                  ;; Every other typed family -- i32, typed maps, keywords,
+                  ;; documents -- could hide behind a binding.
+                  ;;
+                  ;; This is also why `xorshift32` reached the backend while
+                  ;; the `u32-wrap` it desugars into was gated: the frontend
+                  ;; expands it to exactly such a `let`.
+                  ;;
+                  ;; Binders and the shape of the vector are checked but not
+                  ;; walked: a binder is a symbol, and walking the vector as a
+                  ;; whole is what the record/variant cases deliberately avoid
+                  ;; for sealed type descriptors.
+                  (= op 'let)
+                  (let [[bindings body] args]
+                    (and (vector? bindings)
+                         (even? (count bindings))
+                         (every? symbol? (take-nth 2 bindings))
+                         (every? walk (take-nth 2 (rest bindings)))
+                         (walk body)))
+
                   :else
                   (and (not (contains? non-string-typed-ops op))
                        (every? walk args))))
@@ -327,10 +359,25 @@
               (or (keyword? form) (boolean? form)) false
               (seq? form)
               (let [[op & args] form]
-                (and (not (contains? non-string-typed-ops op))
-                     (every? walk args)))
+                ;; Same hole `only-native-word-typed-features?` had, and here
+                ;; the blanket `(vector? form) true` below made it explicit
+                ;; without meaning to: a `let` binding vector is not a sealed
+                ;; type descriptor, but it was admitted as one, so any typed
+                ;; operation bound by a `let` skipped this gate entirely.
+                (if (= op 'let)
+                  (let [[bindings body] args]
+                    (and (vector? bindings)
+                         (even? (count bindings))
+                         (every? symbol? (take-nth 2 bindings))
+                         (every? walk (take-nth 2 (rest bindings)))
+                         (walk body)))
+                  (and (not (contains? non-string-typed-ops op))
+                       (every? walk args))))
               ;; Type descriptors inside typed-cap-call are vectors and are
-              ;; sealed constants, not runtime construction operations.
+              ;; sealed constants, not runtime construction operations. This
+              ;; stays a blanket admit because `let` -- the only other vector
+              ;; that carries expressions -- is now destructured above and
+              ;; never reaches here as a whole form.
               (vector? form) true
               :else false))]
     (every? #(walk (:body %)) (:functions hir))))
