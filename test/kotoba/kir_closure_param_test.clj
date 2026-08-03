@@ -10,15 +10,19 @@
    :effects #{}
    :functions
    [{:name 'main :params [] :param-types [] :result :i64 :effects #{}
-     :body (list 'let ['closure closure-expr] '(consume closure))}
+     :body '(consume (make))}
+    {:name 'make :params [] :param-types [] :closure-result? true
+     :result :i64 :effects #{} :body closure-expr}
     {:name 'consume :params ['closure] :param-types [:i64]
      :closure-param-indexes [0]
      :result :i64 :effects #{} :body '(pair-first closure)}]})
 
 (deftest lower-preserves-and-executes-closure-parameter-refinements
   (let [lowered (kir/lower (hir-with-consumer '(pair 7 0)))
-        consumer (some #(when (= 'consume (:name %)) %) (:functions lowered))]
+        consumer (some #(when (= 'consume (:name %)) %) (:functions lowered))
+        make-fn (some #(when (= 'make (:name %)) %) (:functions lowered))]
     (is (= [0] (:closure-param-indexes consumer)))
+    (is (true? (:closure-result? make-fn)))
     (is (= 7 (kir/execute lowered 'main [])))))
 
 (deftest malformed-closure-parameter-refinements-fail-closed
@@ -28,7 +32,21 @@
            clojure.lang.ExceptionInfo #"closure parameter indexes are malformed"
            (kir/lower
             (assoc-in (hir-with-consumer '(pair 7 0))
-                      [:functions 1 :closure-param-indexes] indexes)))))))
+                      [:functions 2 :closure-param-indexes] indexes)))))))
+
+(deftest malformed-closure-result-refinements-fail-closed
+  (doseq [value [false 1 :yes]]
+    (testing (pr-str value)
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"closure result refinement is malformed"
+           (kir/lower
+            (assoc-in (hir-with-consumer '(pair 7 0))
+                      [:functions 1 :closure-result?] value))))))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"closure result refinement is malformed"
+       (kir/lower
+        (assoc-in (hir-with-consumer '(pair 7 0))
+                  [:functions 1 :result] :string)))))
 
 (deftest closure-parameter-runtime-shape-is-checked
   (testing "an ordinary i64 cannot masquerade as a closure handle"
