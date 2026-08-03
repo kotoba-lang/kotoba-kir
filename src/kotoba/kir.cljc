@@ -1041,6 +1041,24 @@
         current
         (recur parent (dec remaining))))))
 
+;; The interpreter's single truth convention, in one place.
+;;
+;; `:bool` is a plain 0/1 word inside a module, but a host boolean may also
+;; appear -- 38d1bd0 boxes one at the execute boundary and states that both
+;; remain acceptable internally. So deciding "is this false" must decode both.
+;;
+;; `if` had this inline and was correct. `bool-not` re-derived it as a bare
+;; `(not value)`, which misreads the word: 0 is truthy in Clojure, so
+;; `(not 0)` and `(not 1)` are both false and `bool-not` returned FALSE FOR
+;; EVERY INPUT. Comparisons evaluate to 0/1, so `(bool-not (= a b))` -- the
+;; obvious way to write "not equal" -- was constantly false. Because this
+;; interpreter is the oracle the other targets are checked against, that was
+;; the language's definition, not merely a reference-only slip.
+(defn- kotoba-false? [value]
+  (if (boolean? value)
+    (not value)
+    #?(:clj (zero? value) :cljs (i64/k-zero? value))))
+
 (defn eval-expr [form env functions fuel heap call-stack cap-call]
   (cond
     #?(:clj (integer? form)
@@ -1075,10 +1093,7 @@
         (= op 'if)
         (let [[test then else] args
               test-value (eval-expr test env functions fuel heap call-stack cap-call)]
-          (eval-expr (if (if (boolean? test-value)
-                           (not test-value)
-                           #?(:clj (zero? test-value) :cljs (i64/k-zero? test-value)))
-                       else then)
+          (eval-expr (if (kotoba-false? test-value) else then)
                      env functions fuel heap call-stack cap-call))
 
         (= op 'do)
@@ -1474,7 +1489,7 @@
           (value/bounded-map! result))
 
         (= op 'bool-not)
-        (not (eval-expr (first args) env functions fuel heap call-stack cap-call))
+        (kotoba-false? (eval-expr (first args) env functions fuel heap call-stack cap-call))
 
         (= op 'option-some)
         [true (eval-expr (first args) env functions fuel heap call-stack cap-call)]
