@@ -445,7 +445,8 @@
   [chunks]
   (make-bytes-stream (concat-bytes chunks)))
 
-(defn- empty-bytes
+(defn empty-bytes
+  "Construct the canonical empty `:bytes` value for the current host."
   []
   #?(:clj (byte-array 0) :cljs (js/Uint8Array. 0)))
 
