@@ -944,7 +944,47 @@
                                   :cljs (* x (js/BigInt 32)))))]
     x))
 
-(declare eval-expr)
+(declare eval-expr read-pair)
+
+(defn- validated-closure-param-indexes
+  "Validate the internal representation refinement used for parameters that
+  carry compiler closure handles. Their ABI type remains i64; the metadata
+  lets representation-aware runtimes check the pair shape without widening
+  every ordinary i64 parameter."
+  [function]
+  (let [present? (contains? function :closure-param-indexes)
+        indexes (:closure-param-indexes function)
+        params (:params function)
+        param-types (or (:param-types function)
+                        (vec (repeat (count params) :i64)))]
+    (when (and present?
+               (not (and (vector? indexes)
+                         (= indexes (vec (sort (distinct indexes))))
+                         (every? #(and (integer? %) (<= 0 %)
+                                       (< % (count params))
+                                       (= :i64 (nth param-types % nil)))
+                                 indexes))))
+      (throw (ex-info "closure parameter indexes are malformed"
+                      {:phase :ir :function (:name function)
+                       :closure-param-indexes indexes})))
+    (or indexes [])))
+
+(defn- validate-closure-handle!
+  "Check the interpreter's heap-backed closure pair and its bounded capture
+  chain. Wasm/native retain the same i64 word ABI; this is the reference
+  representation check corresponding to restricted ESM's physical pair guard."
+  [heap handle position]
+  (let [lambda-id (read-pair heap handle 0)
+        captures (read-pair heap handle 1)]
+    (validate-runtime-value! lambda-id :i64 (assoc position :closure-id true))
+    (loop [chain captures
+           count 0]
+      (cond
+        #?(:clj (zero? chain) :cljs (i64/k-zero? chain)) nil
+        (>= count 5) (trap! :invalid-closure-capture-chain
+                            {:position position :max-captures 5})
+        :else (do (read-pair heap chain 0)
+                  (recur (read-pair heap chain 1) (inc count)))))))
 
 ;; T7.4 / T7.1: self-tail calls on frontend-synthesized `__kotoba_loop_N`
 ;; helpers trampoline in the KIR interpreter so 10k+ iterations do not blow
@@ -979,10 +1019,15 @@
                               :actual (count values)}))
     (let [param-types (or (:param-types function)
                           (vec (repeat (count (:params function)) :i64)))
+          closure-param-indexes (set (validated-closure-param-indexes function))
           fname (:name function)]
-      (doseq [[parameter runtime-value type] (map vector (:params function) values param-types)]
+      (doseq [[index parameter runtime-value type]
+              (map vector (range) (:params function) values param-types)]
         (validate-runtime-value! runtime-value type {:function fname
-                                                     :parameter parameter}))
+                                                     :parameter parameter})
+        (when (contains? closure-param-indexes index)
+          (validate-closure-handle! heap runtime-value
+                                    {:function fname :parameter parameter})))
       ;; Charge once on first entry; loop-helper self-tail re-entries are free (T7.1).
       (let [stack' (conj stack fname)]
         (when charge?
@@ -2430,6 +2475,8 @@
    (when-not (and (integer? kgraph-capacity) (<= 0 kgraph-capacity default-kgraph-capacity))
      (throw (ex-info "kgraph capacity is outside runtime limits"
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
+   (doseq [function (:functions kir)]
+     (validated-closure-param-indexes function))
    (let [cap-dispatch (when (or cap-call typed-cap-call)
                         (fn
                           ([cap-id value]
@@ -2529,8 +2576,13 @@
               :schema-identities (:schema-identities hir)
               :signature (when (:entry hir) {:params [] :result (:result hir)})
               :effects (:effects hir)
-              :functions (mapv #(select-keys % (cond-> [:name :params :result :effects :body]
-                                                 typed-values? (conj :param-types)))
+              :functions (mapv (fn [function]
+                                 (validated-closure-param-indexes function)
+                                 (select-keys function
+                                              (cond-> [:name :params :result :effects :body]
+                                                typed-values? (conj :param-types)
+                                                (contains? function :closure-param-indexes)
+                                                (conj :closure-param-indexes))))
                                (:functions hir))}
         ;; Effectful results require host authority and cannot be constant-oracled.
         ;; Deep pure loops (T7.4) need oracle-fuel; loop-helper trampoline keeps
