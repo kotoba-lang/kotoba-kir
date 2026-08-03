@@ -70,3 +70,47 @@
                 '(let (a 1) a)]]
     (testing (str form)
       (is (false? (kir/only-native-word-typed-features? (hir form)))))))
+
+;; ---------------------------------------------------------------------------
+;; A pure predicate entry gets a sealed oracle
+;; ---------------------------------------------------------------------------
+
+(defn- lowered [result body]
+  (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+              :result result :effects #{}
+              :functions [{:name 'main :params [] :param-types [] :result result
+                           :effects #{} :body body}]}))
+
+(deftest a-pure-bool-entry-is-folded-and-sealed
+  ;; Excluding :bool left a predicate entry with no sealed oracle at all, and
+  ;; because native is the only path that seals and re-checks one, that alone
+  ;; stopped `(defn main [] (< a b))` from compiling there while it compiled
+  ;; for wasm32, js and cljs.
+  (is (true? (:oracle-value (lowered :bool '(= 1 1)))))
+  (is (false? (:oracle-value (lowered :bool '(= 1 2)))))
+  (is (= 2 (:oracle-value (lowered :i64 '(+ 1 1))))
+      "the i64 path is unchanged"))
+
+(deftest the-sealed-value-is-boxed-and-the-block-is-the-word
+  ;; The boundary convention (see `box-bool` in `execute`): :bool is a 0/1 word
+  ;; INSIDE a module, but the value that LEAVES a target is a host boolean. So
+  ;; the sealed oracle is the boolean -- directly comparable to what a verifier
+  ;; re-executing through `execute` gets -- while :blocks, the internal
+  ;; representation, carries the word `:const.i64` can hold.
+  (doseq [[body boxed word] [['(= 1 1) true 1] ['(= 1 2) false 0]]]
+    (let [k (lowered :bool body)]
+      (is (= boxed (:oracle-value k)))
+      (is (= [[:const.i64 word] [:return]]
+             (:instructions (first (:blocks k))))))))
+
+(deftest a-false-oracle-is-not-mistaken-for-no-oracle
+  ;; `false` is a foldable value now, so the guard on :blocks must be `some?`
+  ;; and not truthiness -- otherwise a predicate that folds to false would look
+  ;; exactly like an entry that could not be folded at all.
+  (is (seq (:blocks (lowered :bool '(= 1 2)))))
+  (is (empty? (:blocks (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                                   :result :i64 :effects #{[:cap/call 1]}
+                                   :functions [{:name 'main :params [] :param-types []
+                                                :result :i64 :effects #{[:cap/call 1]}
+                                                :body '(cap-call 1 0)}]})))
+      "an effectful entry still gets no oracle"))
