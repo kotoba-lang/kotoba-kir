@@ -130,13 +130,21 @@
 ;; `record-type?`/`validate-value-type!` (that generic check already ran
 ;; before `ir/lower` produced this HIR), just narrows it further to the
 ;; scalar-only field-type universe this native increment implements.
+(declare native-scalar-record-type?)
+
 (defn- native-scalar-record-type? [type]
   (and (vector? type) (= 3 (count type)) (= :record (first type))
        (keyword? (second type)) (some? (namespace (second type)))
        (vector? (nth type 2)) (seq (nth type 2))
+       ;; A field may also be a record, which the backends FLATTEN into the
+       ;; enclosing record's own slots -- recursively -- so a nested record
+       ;; still never needs a runtime representation of its own. The criterion
+       ;; here is therefore no longer only fits-in-one-word but
+       ;; flattens-into-words.
        (every? (fn [field]
                  (and (vector? field) (= 2 (count field)) (keyword? (first field))
-                      (contains? native-word-field-types (second field))))
+                      (or (contains? native-word-field-types (second field))
+                          (native-scalar-record-type? (second field)))))
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
 
