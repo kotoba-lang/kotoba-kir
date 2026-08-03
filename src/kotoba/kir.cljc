@@ -969,6 +969,17 @@
                        :closure-param-indexes indexes})))
     (or indexes [])))
 
+(defn- validated-closure-result? [function]
+  (let [present? (contains? function :closure-result?)
+        closure-result? (:closure-result? function)]
+    (when (and present?
+               (not (and (true? closure-result?)
+                         (= :i64 (or (:result function) :i64)))))
+      (throw (ex-info "closure result refinement is malformed"
+                      {:phase :ir :function (:name function)
+                       :closure-result? closure-result?})))
+    (true? closure-result?)))
+
 (defn- validate-closure-handle!
   "Check the interpreter's heap-backed closure pair and its bounded capture
   chain. Wasm/native retain the same i64 word ABI; this is the reference
@@ -1047,8 +1058,13 @@
               (recur next-fn (:values result)
                      (if self-loop? stack stack')
                      (not self-loop?)))
-            (validate-runtime-value! result (or (:result function) :i64)
-                                     {:function fname :result true})))))))
+            (do
+              (validate-runtime-value! result (or (:result function) :i64)
+                                       {:function fname :result true})
+              (when (validated-closure-result? function)
+                (validate-closure-handle! heap result
+                                          {:function fname :result true}))
+              result)))))))
 
 (defn- allocate-pair! [heap left right]
   (let [{:keys [cells capacity]} heap
@@ -2476,7 +2492,8 @@
      (throw (ex-info "kgraph capacity is outside runtime limits"
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
    (doseq [function (:functions kir)]
-     (validated-closure-param-indexes function))
+     (validated-closure-param-indexes function)
+     (validated-closure-result? function))
    (let [cap-dispatch (when (or cap-call typed-cap-call)
                         (fn
                           ([cap-id value]
@@ -2578,11 +2595,14 @@
               :effects (:effects hir)
               :functions (mapv (fn [function]
                                  (validated-closure-param-indexes function)
+                                 (validated-closure-result? function)
                                  (select-keys function
                                               (cond-> [:name :params :result :effects :body]
                                                 typed-values? (conj :param-types)
                                                 (contains? function :closure-param-indexes)
-                                                (conj :closure-param-indexes))))
+                                                (conj :closure-param-indexes)
+                                                (contains? function :closure-result?)
+                                                (conj :closure-result?))))
                                (:functions hir))}
         ;; Effectful results require host authority and cannot be constant-oracled.
         ;; Deep pure loops (T7.4) need oracle-fuel; loop-helper trampoline keeps
