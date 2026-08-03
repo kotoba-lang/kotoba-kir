@@ -941,7 +941,23 @@
                        (when (> @bytes document-utf8-byte-limit)
                          (throw (ex-info "document exceeds aggregate UTF-8 limit"
                                          {:phase :value :limit document-utf8-byte-limit}))))]
-    (letfn [(walk [node depth]
+    (letfn [(walk-map-key [key depth]
+              ;; Keyword keys existed before keys became document nodes. Keep
+              ;; their historical text budget without consuming a node slot.
+              (cond
+                (keyword? key)
+                (do (bounded-keyword! key keyword-value-byte-limit)
+                    (charge-text! (str key))
+                    ["keyword" key])
+
+                (and (vector? key) (= 2 (count key)) (= "keyword" (first key)))
+                (let [payload (second key)]
+                  (bounded-keyword! payload keyword-value-byte-limit)
+                  (charge-text! (str payload))
+                  ["keyword" payload])
+
+                :else (walk key depth)))
+            (walk [node depth]
               (when (> depth document-depth-limit)
                 (throw (ex-info "document exceeds depth limit"
                                 {:phase :value :limit document-depth-limit})))
@@ -1005,9 +1021,7 @@
                         (throw (ex-info "invalid document map"
                                         {:phase :value :limit document-container-item-limit})))
                       (let [entries (mapv (fn [[key item]]
-                                            [(if (keyword? key)
-                                               (walk ["keyword" key] (inc depth))
-                                               (walk key (inc depth)))
+                                            [(walk-map-key key (inc depth))
                                              (walk item (inc depth))])
                                           payload)
                             canonical (vec (sort (fn [[left] [right]]
