@@ -120,10 +120,11 @@
 ;; that orthogonal gate too. `:keyword` is admitted for the same reason `:string` is:
 ;; the backends now carry a keyword as the same one-word pair(offset,length)
 ;; handle, over its printed text, which is the representation
-;; `kotoba.wasm.core` already chose for keyword literals. That admits keyword
-;; VALUES, not keyword OPERATIONS -- `keyword-name` and `keyword-from-string`
-;; would need a general substring and concatenation over a runtime handle and
-;; are not implemented.
+;; `kotoba.wasm.core` already chose for keyword literals. That admitted keyword
+;; VALUES and not keyword OPERATIONS for as long as `keyword-name` and
+;; `keyword-from-string` wanted a general substring and concatenation over a
+;; runtime handle; both landed 2026-08-04, so both operations are admitted
+;; below and each backend desugars into exactly them.
 (def ^:private native-word-field-types #{:i64 :bool :string :keyword})
 
 ;; Structural shape check only (`[:record :qualified/kw [[:field :type] ...]]`)
@@ -308,6 +309,14 @@
                   (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
                                 f64-unordered} op)
                   (and (= 2 (count args)) (every? walk args))
+                  ;; Keyword OPERATIONS, which `native-word-field-types`'s
+                  ;; comment listed as needing a general substring and
+                  ;; concatenation over a runtime handle. Both now exist, and
+                  ;; both backends desugar into exactly them -- no new value
+                  ;; representation, since a keyword already travels as the
+                  ;; one-word pair handle its printed text occupies.
+                  (contains? '#{keyword-name keyword-from-string} op)
+                  (and (= 1 (count args)) (walk (first args)))
                   ;; `bool-not` sits beside the option/result cases below for
                   ;; the same reason they do: it stays in
                   ;; `non-string-typed-ops` (the cljs gate shares that set) but
