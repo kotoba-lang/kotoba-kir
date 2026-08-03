@@ -61,7 +61,7 @@
      result-ok-of result-err-of result-ok?-of result-value-of result-error-of result-match-of
      variant-new variant-match
      option-some-of option-none-of option-some?-of option-value-of option-match
-     typed-list-new
+     typed-list-new bytes-empty
      hetero-vector-new hetero-vector-count hetero-vector-at hetero-vector-assoc hetero-vector-equal
      typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal typed-set-nth
      typed-map-new typed-map-count typed-map-contains typed-map-get
@@ -1334,6 +1334,9 @@
               text #?(:clj (Long/toString (long n))
                       :cljs (.toString ^js n))]
           (value/bounded-string! text value/string-value-byte-limit))
+
+        (= op 'bytes-empty)
+        (value/empty-bytes)
 
         ;; Guest poll (ADR 0127): 1 if ready, 0 if pending; cancelled traps.
         (= op 'task-ready?)
