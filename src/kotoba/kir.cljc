@@ -116,10 +116,14 @@
 ;; `:f64` stays out for the reason the previous comment gave and which has not
 ;; changed: `kotoba.compiler.core`'s own f32/f64 gate rejects any f64 on native
 ;; independently of records, so admitting it here would silently have to widen
-;; that orthogonal gate too. `:keyword` stays out because the backends have no
-;; keyword representation at all -- handed one directly they throw
-;; IllegalArgumentException, not a diagnosable rejection.
-(def ^:private native-word-field-types #{:i64 :bool :string})
+;; that orthogonal gate too. `:keyword` is admitted for the same reason `:string` is:
+;; the backends now carry a keyword as the same one-word pair(offset,length)
+;; handle, over its printed text, which is the representation
+;; `kotoba.wasm.core` already chose for keyword literals. That admits keyword
+;; VALUES, not keyword OPERATIONS -- `keyword-name` and `keyword-from-string`
+;; would need a general substring and concatenation over a runtime handle and
+;; are not implemented.
+(def ^:private native-word-field-types #{:i64 :bool :string :keyword})
 
 ;; Structural shape check only (`[:record :qualified/kw [[:field :type] ...]]`)
 ;; -- deliberately does not re-derive `kotoba.compiler.frontend`'s own
@@ -197,7 +201,10 @@
               ;; rejected -- this increment implements no native keyword
               ;; representation.
               (boolean? form) true
-              (keyword? form) false
+              ;; A keyword literal is now a value this backend can carry -- see
+              ;; `native-word-field-types`. It was rejected here while no native
+              ;; keyword representation existed.
+              (keyword? form) true
               (seq? form)
               (let [[op & args] form]
                 (cond
