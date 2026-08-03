@@ -1041,7 +1041,9 @@
   "UTF-8 byte sequence for S as a seq of 0-255 ints."
   [s]
   #?(:clj (map #(bit-and (int %) 0xff) (.getBytes ^String s StandardCharsets/UTF_8))
-     :cljs (js->clj (.encode (js/TextEncoder.) s))))
+     ;; nbb keeps typed arrays opaque under js->clj. Convert through a plain
+     ;; JS Array so count/doseq behave identically on JVM Clojure and CLJS.
+     :cljs (js->clj (js/Array.from (.encode (js/TextEncoder.) s)))))
 
 (defn- normalize-document-f64 [value]
   ;; Match document-equal? identity for signed zero.
@@ -1053,7 +1055,7 @@
   s <utf8-len> : <bytes> | k <utf8-len> : <keyword-str-with-colon-bytes> |
   y <utf8-len> : <symbol-bytes> |
   v <count> : <items...> | l <count> : <items...> | e <count> : <items...> |
-  m <count> : (K <key-len> : <key-bytes> <item>)*
+  m <count> : ((K <keyword-len> : <keyword-bytes> | D <document-key>) <item>)*
 
   Keywords (values and map keys) use the full `str` form including the leading
   colon (e.g. \":tag\"). Map keys are tagged with capital K to distinguish them
