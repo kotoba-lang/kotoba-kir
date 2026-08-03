@@ -2447,11 +2447,31 @@
         ;; Deep pure loops (T7.4) need oracle-fuel; loop-helper trampoline keeps
         ;; host stack flat so 10k finishes. Unbounded non-helper recursion still
         ;; traps (fuel or host-stack) and aborts lower — intentional.
-        value (when (and (:entry hir) (= :i64 (:result hir))
+        ;; `:bool` folds too. It used to be excluded, which left a pure
+        ;; predicate entry with no sealed oracle at all -- and because the
+        ;; native path is the only one that seals and re-checks an oracle,
+        ;; that alone was what stopped `(defn main [] (< a b))` from
+        ;; compiling for native while it compiled for wasm32, js and cljs.
+        ;;
+        ;; The value sealed here is the BOXED boolean `execute` returns, per
+        ;; the boundary convention this namespace already adopted (see
+        ;; `box-bool` in `execute`): `:bool` is a 0/1 word inside a module,
+        ;; but the value that leaves a target is a host boolean, so wasm's
+        ;; export wrapper, the restricted-ESM emitter and this interpreter all
+        ;; hand back one. Sealing the boxed value keeps
+        ;; `kotoba.verifier`'s own re-execution comparable to it directly.
+        value (when (and (:entry hir) (contains? #{:i64 :bool} (:result hir))
                          (empty? (:effects hir)) (not kernel-native?))
                 (execute base (:entry hir) [] {:fuel oracle-fuel}))]
     (assoc base
            :oracle-value value
+           ;; `:blocks` is the INTERNAL representation and keeps the 0/1 word,
+           ;; which is what `:const.i64` can carry and what every target uses
+           ;; inside a module. `some?` rather than truthiness, because `false`
+           ;; is now a foldable value and must not be mistaken for "no oracle".
            :blocks (if (some? value)
-                     [{:id 0 :instructions [[:const.i64 value] [:return]]}]
+                     [{:id 0 :instructions [[:const.i64 (if (boolean? value)
+                                                          (if value 1 0)
+                                                          value)]
+                                            [:return]]}]
                      []))))
