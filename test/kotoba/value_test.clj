@@ -16,6 +16,16 @@
                         (value/utf8-byte-count!
                          (String. (char-array [(char 0xdc00)]))))))
 
+(deftest utf8-index-operations-normalize-bounded-guest-offsets
+  (is (= "4" (value/utf8-substring! "0123456789" 4 5)))
+  (is (= "葉" (value/utf8-substring! "言葉" 3 6)))
+  (is (= 0x8a00 (value/utf8-code-point-at! "言葉" 0)))
+  (is (= 0x8449 (value/utf8-code-point-at! "言葉" 3)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"splits a UTF-8 code point"
+                        (value/utf8-substring! "言葉" 1 3)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"out of bounds"
+                        (value/utf8-code-point-at! "言葉" 6))))
+
 (deftest bounded-keyword-and-map-values-are-owned-and-typed
   (is (= :安全/確認 (value/bounded-keyword! :安全/確認 32)))
   (is (= {:a 1 :b 2} (value/bounded-map! {:a 1 :b 2})))

@@ -687,18 +687,40 @@
             (swap! st assoc :offset next-offset)
             {:bytes chunk :done? done? :pending? false}))))))
 
+(defn- bounded-host-byte-offset
+  "Normalize a guest i64 byte offset to a host string index only after it is
+  proven inside the small UTF-8 payload bound. CLJS guest integers are BigInt;
+  comparing them with the host-number byte length makes valid offsets fail and
+  using them as map keys misses number-keyed boundary tables."
+  [offset length inclusive-end?]
+  #?(:clj
+     (when (and (integer? offset) (<= 0 offset)
+                ((if inclusive-end? <= <) offset length))
+       (long offset))
+     :cljs
+     (let [offset* (cond
+                     (i64/bigint-value? offset) offset
+                     (integer? offset) (i64/->bigint offset)
+                     :else nil)
+           length* (i64/->bigint length)]
+       (when (and offset* (not (i64/k-neg? offset*))
+                  ((if inclusive-end? <= <) offset* length*))
+         (js/Number offset*)))))
 
 (defn utf8-substring!
   "Checked UTF-8 byte-offset substring. Both offsets must be code-point
   boundaries; malformed UTF-16 is rejected by utf8-byte-count! first."
   [value start end]
-  (let [length (utf8-byte-count! value)]
-    (when-not (and (integer? start) (integer? end) (<= 0 start end length))
+  (let [length (utf8-byte-count! value)
+        start-index (bounded-host-byte-offset start length true)
+        end-index (bounded-host-byte-offset end length true)]
+    (when-not (and (some? start-index) (some? end-index)
+                   (<= start-index end-index))
       (throw (ex-info "string substring indexes are out of bounds"
                       {:phase :value :start start :end end :length length})))
     (loop [index 0 byte-index 0 boundaries {0 0}]
       (if (= index (count value))
-        (let [from (get boundaries start) to (get boundaries end)]
+        (let [from (get boundaries start-index) to (get boundaries end-index)]
           (when-not (and (some? from) (some? to))
             (throw (ex-info "string substring index splits a UTF-8 code point"
                             {:phase :value :start start :end end})))
@@ -721,8 +743,9 @@
   UTF-8 byte width from the returned value (< 0x80 -> 1, < 0x800 -> 2,
   < 0x10000 -> 3, else 4) to advance, so a single op is enough to walk a string."
   [value byte-offset]
-  (let [length (utf8-byte-count! value)]
-    (when-not (and (integer? byte-offset) (<= 0 byte-offset) (< byte-offset length))
+  (let [length (utf8-byte-count! value)
+        byte-index-target (bounded-host-byte-offset byte-offset length false)]
+    (when-not (some? byte-index-target)
       (throw (ex-info "string code-point offset is out of bounds"
                       {:phase :value :offset byte-offset :length length})))
     (loop [index 0 byte-index 0]
@@ -743,8 +766,8 @@
                         (- next-unit 0xdc00))])
               :else [1 3 unit])]
         (cond
-          (= byte-index byte-offset) code-point
-          (> (+ byte-index bytes) byte-offset)
+          (= byte-index byte-index-target) code-point
+          (> (+ byte-index bytes) byte-index-target)
           (throw (ex-info "string code-point offset splits a UTF-8 code point"
                           {:phase :value :offset byte-offset}))
           :else (recur (+ index units) (+ byte-index bytes)))))))
