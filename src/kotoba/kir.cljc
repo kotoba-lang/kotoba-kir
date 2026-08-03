@@ -250,6 +250,16 @@
                                       [:result-i64 :result-i64]}
                                     [request-type result-type])
                          (walk request)))
+                  ;; f64 scalar arithmetic on native (ADR-2608030300). Same
+                  ;; reasoning as `i32-operations` above: no new value
+                  ;; representation, only i64 words -- here carrying an
+                  ;; IEEE-754 bit pattern. Both native ISAs emit these
+                  ;; directly. f32 is deliberately absent: neither backend
+                  ;; implements it.
+                  (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
+                                f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
+                             op)
+                  (every? walk args)
                   (= op 'option-some)
                   (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-none)
