@@ -397,6 +397,40 @@
                              op)
                   (every? walk args)
 
+                  ;; `vector-i64` / `vector-f64` (ADR-2608030300). Admitted for
+                  ;; the same reason `i32-operations` above are: they stay in
+                  ;; `non-string-typed-ops` because the CLJS gate shares that
+                  ;; set and does not implement them, so the exception is made
+                  ;; here for this target rather than by widening the shared
+                  ;; set.
+                  ;;
+                  ;; It costs no new value representation on native. A vector
+                  ;; value is a one-word HANDLE into a host table -- the same
+                  ;; width and the same discipline as the pair handle every
+                  ;; option, result, string and keyword above already travels
+                  ;; as. The elements live host-side, so nothing here needs a
+                  ;; word wider than the slice machinery already has.
+                  ;;
+                  ;; The f64 family is admitted by the same clause and not a
+                  ;; separate one, because a native f64 is already an i64 word
+                  ;; carrying an IEEE-754 bit pattern (see the f64 arithmetic
+                  ;; case above): an f64 vector is a vector of those words, so
+                  ;; there is exactly one thing to admit.
+                  ;;
+                  ;; `vector-new` is variadic -- its arity is the literal's
+                  ;; element count -- so unlike every fixed-arity case here it
+                  ;; constrains only its elements. The backends expand it into
+                  ;; one host call per element; the element-count bound that
+                  ;; makes that expansion finite is `vector-item-limit`, and it
+                  ;; is enforced where the value is built, not here.
+                  (contains? '#{vector-new vector-count vector-get vector-at
+                                vector-drop vector-assoc vector-conj
+                                vector-f64-new vector-f64-count vector-f64-get
+                                vector-f64-at vector-f64-drop vector-f64-assoc
+                                vector-f64-conj}
+                             op)
+                  (every? walk args)
+
                   ;; `let` MUST be walked explicitly. Without this case it fell
                   ;; to `:else`, which walks `args` -- and the first arg is the
                   ;; binding VECTOR, which is not `seq?` (vectors never are),
