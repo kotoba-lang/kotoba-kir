@@ -22,7 +22,6 @@
 ;; string slice, so those are admitted by design and would prove nothing here.
 (def ^:private excluded
   ['(map-new)
-   '(keyword-from-string "k")
    '(document-null)])
 
 ;; Admitted on native, still excluded on cljs. They stay in
@@ -35,7 +34,47 @@
    '(i32-xor 1 2)
    '(i32-shift-left 1 2)
    '(i32-wrapping-add 1 2)
-   '(u32-shift-right 1 2)])
+   '(u32-shift-right 1 2)
+   ;; Keyword operations. Admitted on native since both backends gained a
+   ;; general substring and a concatenation over a runtime handle; they were
+   ;; listed as excluded here until then, and this list was not moved when the
+   ;; admission landed.
+   '(keyword-from-string "k")
+   '(keyword-name :k)
+   ;; vector-i64 / vector-f64 (ADR-2608030300). Native carries a vector as a
+   ;; one-word handle into a host table, so it needs no representation the
+   ;; one-word slice above does not already have; cljs still does not
+   ;; implement them and must keep rejecting them.
+   ;;
+   ;; `vector-new` is deliberately absent: unlike every other operation in
+   ;; either family it is NOT in `non-string-typed-ops`, so the cljs gate
+   ;; admits it. That set can build a vector cljs cannot then read, which is
+   ;; incoherent but is a property of the shared set rather than of this
+   ;; predicate -- recorded rather than silently repaired here, because
+   ;; adding it would narrow a different target in a change about native.
+   '(vector-count (vector-new 1))
+   '(vector-at (vector-new 1) 0)
+   '(vector-get (vector-new 1) 0 7)
+   '(vector-assoc (vector-new 1) 0 2)
+   '(vector-conj (vector-new 1) 2)
+   '(vector-drop (vector-new 1) 1)
+   '(vector-f64-new 1)
+   '(vector-f64-count (vector-f64-new 1))
+   '(vector-f64-at (vector-f64-new 1) 0)
+   '(vector-f64-get (vector-f64-new 1) 0 7)
+   '(vector-f64-assoc (vector-f64-new 1) 0 2)
+   '(vector-f64-conj (vector-f64-new 1) 2)
+   '(vector-f64-drop (vector-f64-new 1) 1)])
+
+;; `vector-new` alone is admitted by BOTH gates, because it is the one
+;; operation in either vector family that is missing from
+;; `non-string-typed-ops`. Pinned as its own case rather than folded into
+;; `native-only` so that the asymmetry is stated instead of hidden: a set that
+;; lets cljs build a vector it cannot then count is incoherent, and if it is
+;; ever repaired this test should fail and be moved, not quietly pass.
+(def ^:private admitted-by-both
+  ['(vector-new)
+   '(vector-new 1 2)])
 
 (deftest a-let-binding-does-not-launder-an-excluded-operation
   (doseq [form excluded]
@@ -61,6 +100,15 @@
           "and a let binding must not change that either")
       (is (false? (kir/only-cljs-provider-typed-features? (hir form)))
           "cljs does not implement these and must keep rejecting them")))) 
+
+(deftest vector-new-is-admitted-by-both-gates-unlike-the-rest-of-its-family
+  (doseq [form admitted-by-both]
+    (testing (str form)
+      (is (true? (kir/only-native-word-typed-features? (hir form))))
+      (is (true? (kir/only-native-word-typed-features? (hir (list 'let ['a form] 'a)))))
+      (is (true? (kir/only-cljs-provider-typed-features? (hir form)))
+          "not because cljs implements vectors, but because this one operation
+           is missing from the shared excluded set"))))
 
 (deftest the-cljs-predicate-has-the-same-property
   (doseq [form excluded]
