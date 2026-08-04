@@ -39,7 +39,7 @@
   (value/resource-table-reset!)
   (let [pending (value/make-pending-bytes-task)
         ready (value/task-fulfill! pending (byte-array [1 2 3]))
-        stream (:kotoba.task/stream ready)]
+        stream (:stream (value/task-poll pending))]
     (is (true? (value/task-live? pending)))
     (is (true? (value/task-live? ready)))
     (is (= (:kotoba.task/id pending) (:kotoba.task/id ready)))
@@ -47,6 +47,15 @@
     (let [chunk (value/stream-read! stream 10)]
       (is (true? (:done? chunk)))
       (is (= 3 (value/bytes-byte-count (:bytes chunk)))))))
+
+(deftest stale-pending-snapshot-drops-fulfilled-stream
+  (value/resource-table-reset!)
+  (let [pending (value/make-pending-bytes-task)
+        _ (value/task-fulfill! pending (byte-array [4 5]))
+        stream (:stream (value/task-poll pending))]
+    (value/task-drop! pending)
+    (is (false? (value/task-live? pending)))
+    (is (false? (value/stream-live? stream)))))
 
 (deftest progressive-ops-require-live
   (value/resource-table-reset!)

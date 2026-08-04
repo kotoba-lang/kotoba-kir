@@ -325,7 +325,9 @@
   (when-let [s (:kotoba.task/stream task)]
     (register-stream! s))
   (swap! resource-table assoc-in [:tasks (:kotoba.task/id task)]
-         {:alive true})
+         {:alive true
+          :state (:kotoba.task/state task)
+          :stream (:kotoba.task/stream task)})
   task)
 
 (defn stream-value?
@@ -365,7 +367,8 @@
         e (get-in @resource-table [:tasks id])]
     (when-not (and e (:alive e))
       (throw (ex-info "bytes-task is not live"
-                      {:phase :value :id id})))))
+                      {:phase :value :id id})))
+    e))
 
 (defn stream-drop!
   "Linear drop of a bytes-stream. Subsequent ops on this id fail closed.
@@ -379,10 +382,10 @@
   "Linear drop of a bytes-task (and its ready stream if any). Subsequent ops
   on these ids fail closed. Double-drop fails closed."
   [task]
-  (require-task-alive! task)
-  (when-let [s (:kotoba.task/stream task)]
+  (let [entry (require-task-alive! task)]
+    (when-let [s (:stream entry)]
     (when (get-in @resource-table [:streams (:kotoba.stream/id s) :alive])
-      (stream-drop! s)))
+        (stream-drop! s))))
   (swap! resource-table assoc-in [:tasks (:kotoba.task/id task) :alive] false)
   nil)
 
@@ -532,55 +535,65 @@
 
 (defn task-poll
   "Poll a bytes-task. Returns {:state :ready|:pending|:cancelled :stream s?}.
-  Requires the task to be live in the resource table (ADR 0133)."
+  The resource table is authoritative, so a host fulfillment is observable
+  through the original pending handle. Requires the task to be live."
   [task]
-  (require-task-alive! task)
-  (case (:kotoba.task/state task)
-    :ready {:state :ready :stream (:kotoba.task/stream task)}
+  (let [{:keys [state stream]} (require-task-alive! task)]
+    (case state
+    :ready {:state :ready :stream stream}
     :pending {:state :pending}
-    :cancelled {:state :cancelled}))
+      :cancelled {:state :cancelled})))
 
 (defn task-cancel!
-  "Return a cancelled copy of the task (same id remains live until drop)."
+  "Cancel the task in the authoritative resource table and return a compatible
+  snapshot. Every copy of the same affine handle observes cancellation."
   [task]
-  (require-task-alive! task)
-  (assoc task :kotoba.task/state :cancelled))
+  (let [{:keys [stream]} (require-task-alive! task)
+        id (:kotoba.task/id task)]
+    (swap! resource-table assoc-in [:tasks id :state] :cancelled)
+    (assoc task :kotoba.task/state :cancelled :kotoba.task/stream stream)))
+
+(defn- fulfill-task-with-stream!
+  [task stream]
+  (let [id (:kotoba.task/id task)]
+    (try
+      (swap! resource-table update-in [:tasks id]
+             (fn [{:keys [alive state] :as entry}]
+               (when-not alive
+                 (throw (ex-info "bytes-task is not live"
+                                 {:phase :value :id id})))
+               (when-not (= :pending state)
+                 (throw (ex-info "task is not pending"
+                                 {:phase :value :state state})))
+               (assoc entry :state :ready :stream stream)))
+      (assoc task :kotoba.task/state :ready :kotoba.task/stream stream)
+      (catch #?(:clj Throwable :cljs :default) error
+        ;; Stream construction registers first. A losing/racing transition must
+        ;; not leak an unreachable affine resource.
+        (when (stream-live? stream)
+          (stream-drop! stream))
+        (throw error)))))
 
 (defn task-fulfill!
   "Transition a :pending bytes-task to :ready with a stream over `payload`.
-  Returns a new task map (same id). Fails closed if not pending or cancelled.
-  This is the reference-path pending→ready scheduling primitive (ADR 0123)."
+  The resource table owns the transition, so polling the original handle sees
+  readiness. Returns a same-id snapshot for compatibility."
   [task payload]
   (require-task-alive! task)
-  (when-not (= :pending (:kotoba.task/state task))
-    (throw (ex-info "task is not pending"
-                    {:phase :value :state (:kotoba.task/state task)})))
-  (assoc task
-         :kotoba.task/state :ready
-         :kotoba.task/stream (make-bytes-stream payload)))
+  (fulfill-task-with-stream! task (make-bytes-stream payload)))
 
 (defn task-fulfill-chunk-queue!
   "Fulfill a pending task with a true multi-chunk stream (ADR 0125).
   Same id; fails closed if not pending."
   [task chunks]
   (require-task-alive! task)
-  (when-not (= :pending (:kotoba.task/state task))
-    (throw (ex-info "task is not pending"
-                    {:phase :value :state (:kotoba.task/state task)})))
-  (assoc task
-         :kotoba.task/state :ready
-         :kotoba.task/stream (make-chunk-queue-bytes-stream chunks)))
+  (fulfill-task-with-stream! task (make-chunk-queue-bytes-stream chunks)))
 
 (defn task-fulfill-open-chunk-queue!
   "Fulfill a pending task with an open progressive stream (ADR 0126)."
   [task]
   (require-task-alive! task)
-  (when-not (= :pending (:kotoba.task/state task))
-    (throw (ex-info "task is not pending"
-                    {:phase :value :state (:kotoba.task/state task)})))
-  (assoc task
-         :kotoba.task/state :ready
-         :kotoba.task/stream (make-open-chunk-queue-bytes-stream)))
+  (fulfill-task-with-stream! task (make-open-chunk-queue-bytes-stream)))
 
 (defn stream-cancel!
   "Cancel a bytes-stream. Subsequent reads fail closed."

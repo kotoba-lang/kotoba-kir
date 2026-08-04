@@ -8,12 +8,24 @@
         payload (value/utf8-string->bytes "later")
         _ (is (= :pending (:state (value/task-poll pending))))
         ready (value/task-fulfill! pending payload)
-        polled (value/task-poll ready)
+        polled (value/task-poll pending)
         chunk (value/stream-read! (:stream polled) 100)]
     (is (= :ready (:state polled)))
     (is (true? (:done? chunk)))
     (is (zero? (value/compare-typed-values :bytes payload (:bytes chunk))))
     (is (= (:kotoba.task/id pending) (:kotoba.task/id ready)))))
+
+(deftest every-same-id-handle-observes-host-transition
+  (value/resource-table-reset!)
+  (let [pending (value/make-pending-bytes-task)
+        copied (into {} pending)
+        payload (value/utf8-string->bytes "observable")]
+    (value/task-fulfill! copied payload)
+    (is (= :ready (:state (value/task-poll pending))))
+    (is (= :ready (:state (value/task-poll copied))))
+    (value/task-drop! pending)
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not live"
+                          (value/task-poll copied)))))
 
 (deftest fulfill-fails-if-not-pending
   (let [ready (value/make-ready-bytes-task (byte-array [1]))
