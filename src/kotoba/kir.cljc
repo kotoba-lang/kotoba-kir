@@ -2632,10 +2632,17 @@
         ;; interpreter could return that would be right, so it must refuse
         ;; rather than invent one -- the alternative would let the oracle
         ;; "confirm" a device read off-hardware.
+        ;; `kernel-read-msr`/`kernel-write-msr` for the same reason again. An
+        ;; MSR read is not a bus transaction, so it is tempting to think it
+        ;; could be modelled -- but its value is CPU and firmware state
+        ;; (EFER, the APIC base, the SYSCALL entry point), often written by
+        ;; another core, and `rdmsr` faults outside ring 0 regardless. There
+        ;; is nothing here that could be right.
         (contains? '#{kernel-boot-info kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-cli kernel-sti kernel-hlt kernel-pause
                       kernel-out-u8 kernel-out-u32
-                      kernel-in-u8 kernel-in-u32} op)
+                      kernel-in-u8 kernel-in-u32
+                      kernel-read-msr kernel-write-msr} op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -2836,7 +2843,13 @@
                              kernel-boot-info kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-cli kernel-sti kernel-hlt kernel-pause
                              kernel-out-u8 kernel-out-u32
-                             kernel-in-u8 kernel-in-u32}
+                             kernel-in-u8 kernel-in-u32
+                             ;; The MSR pair has to be here too, and this is
+                             ;; the set that is easy to miss: it is what marks
+                             ;; a module kernel-native and thereby suppresses
+                             ;; constant-oracling. Without it the oracle would
+                             ;; try to evaluate an `rdmsr` at compile time.
+                             kernel-read-msr kernel-write-msr}
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
