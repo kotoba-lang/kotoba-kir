@@ -225,26 +225,62 @@
 ;; already ship: measured 2026-08-05, every one of murakumo's 33 `*_core.kotoba`
 ;; modules that failed here failed on a record parameter, an `[:option T]`
 ;; record field, or a `:bool` result -- never on anything in a body.
-;; A bare `:bool` PARAMETER is deliberately excluded, which is why this is not
-;; simply `native-word-field-types`. Measured 2026-08-05: `(defn f [b :bool] …)`
-;; is rejected by this namespace's own interpreter with
-;; `{:trap :value-type-mismatch :expected :i64 :position {:parameter b}}` --
-;; `execute` validates a `:bool` argument as an i64 word. That is a real gap,
-;; but it is in the INTERPRETER, not in either backend, and fixing it is a
-;; separate change with its own evidence. Admitting the type here while the
-;; oracle cannot run it would mean shipping a boundary nothing had executed.
-;; `:bool` remains available where it already worked: as a RESULT (the caller's
-;; own `#{:i64 :string :bool}` clause) and as a record FIELD (via
-;; `native-word-field-types`, unchanged).
+;;
+;; A bare `:bool` PARAMETER is now admitted too, and the reason it was excluded
+;; needs correcting rather than deleting, because the exclusion rested on a
+;; misread of its own measurement.
+;;
+;; The native-record-parameters decision (this repo's ADR 0221 supersedes that
+;; part of it; upstream it is `compiler` ADR 0219 / superproject
+;; ADR-2608052000) recorded: "`execute` validates a `:bool` argument as an i64",
+;; citing `{:trap :value-type-mismatch :expected :i64 :position {:parameter b}}`.
+;; The trap is real and still reproduces (`kir-bool-parameter-test` pins it),
+;; but it is not the interpreter refusing a `:bool` parameter. It is the
+;; interpreter CORRECTLY refusing a host boolean where the KIR it was handed
+;; DECLARES `:i64` -- because that KIR carries no `:param-types` table at all,
+;; and `invoke-function` defaults an absent one to `:i64` per parameter.
+;;
+;; The table is absent because `lower` keeps `:param-types` only for
+;; `:kotoba.hir/v3`, and `kotoba.compiler.frontend`'s `typed-values?` excludes
+;; `:bool` by name ("`:bool` literals are plain 0/1 words, not typed values").
+;; So a module whose ONLY typed feature is a `:bool` parameter is emitted as
+;; `:kotoba.hir/v2` and loses its parameter types on the way down. That is a
+;; live gap, but it lives in the compiler's format classification, not here,
+;; and closing it moves `:kir-sha256` for every affected module on every
+;; target -- so it is named as a follow-on, not done in passing.
+;;
+;; Where the table IS present -- any module with a `:bool` parameter alongside
+;; any other typed feature, which is exactly the shape this gate governs --
+;; `execute` runs a `:bool` parameter today and always could. Measured
+;; 2026-08-05 and pinned by `kir-bool-parameter-test`: a host boolean crossing
+;; the entry boundary, an `if` test, `bool-not`, `=`, a `let` rebinding, a call
+;; into another `:bool` parameter, a `:bool` record field built from it, and a
+;; `:bool` result boxed back out. The boundary convention is unchanged and now
+;; symmetric in both directions: a host boolean is what ENTERS (the argument
+;; check below requires `boolean?` and rejects the word `1`) and a host boolean
+;; is what LEAVES (`box-bool`), while inside a module `:bool` stays a plain 0/1
+;; word -- both spellings decoded by the single `kotoba-false?`.
+;;
+;; So this is not "admit the type and hope": the oracle executes one, which is
+;; the precondition ADR 0219 set and the only reason it declined.
+;;
+;; `kotoba.verifier` re-derives this same boundary set independently and still
+;; excludes `:bool`. Leaving it stricter is sound -- it can only reject -- but
+;; it is NOT a no-op: a `:bool`-parameter module now passes target selection
+;; and is refused later by `verify-native-artifact!` as "runtime KIR function
+;; shape rejected". Widening `kotoba.verifier/native-boundary-type?` the same
+;; way is the required follow-on before the native path works end to end.
 (defn- native-boundary-type? [type schemas]
   (let [type (if (and (vector? type) (= 2 (count type)) (= :ref (first type))
                       (keyword? (second type)))
                (get schemas (second type) type)
                type)]
-    (and (not= :bool type)
-         (or (contains? #{:i64 :string :keyword} type)
-             (native-word-value-type? type)
-             (native-scalar-record-type? type)))))
+    (or (contains? #{:i64 :string :keyword} type)
+        ;; `:bool` reaches admission through here: `native-word-value-type?`
+        ;; has always listed it, and the `(not= :bool type)` guard that used to
+        ;; wrap this whole `or` is what withheld it.
+        (native-word-value-type? type)
+        (native-scalar-record-type? type))))
 
 (defn only-native-word-typed-features? [hir]
   (letfn [(walk [form]
