@@ -516,6 +516,44 @@
                              op)
                   (every? walk args)
 
+                  ;; `string-contains?` / `string-replace-all` are admitted for
+                  ;; exactly the reason `i32-operations` and the `vector-*`
+                  ;; families above are, and by the same mechanism: they STAY in
+                  ;; `non-string-typed-ops`, because the CLJS gate
+                  ;; (`only-cljs-provider-typed-features?`, below) shares that
+                  ;; set and does not lower them -- so the exception is made
+                  ;; here, for this target only, rather than by removing the two
+                  ;; entries from the shared set and silently widening the other
+                  ;; gate with them.
+                  ;;
+                  ;; They cost no new value representation, no new context
+                  ;; callback and no ABI change. `kotoba.native.string-search`
+                  ;; (kotoba-native, ADR 0002, both ISAs from one shared source)
+                  ;; lowers both by REWRITING them into the four string
+                  ;; callbacks this slice has always had -- `string=?` (112),
+                  ;; `string-concat` (120), `string-substring` (136),
+                  ;; `string-code-point-at` (144) -- plus i64 arithmetic. That is
+                  ;; the same desugaring discipline `keyword-name` /
+                  ;; `keyword-from-string` above already follow, and the reason
+                  ;; those two are admitted here is the reason these two are.
+                  ;;
+                  ;; The arities are pinned, not left to `every? walk`, matching
+                  ;; the fixed-arity cases above and the exact shapes both
+                  ;; backends dispatch on (`x86_64.cljc` 1189/1192,
+                  ;; `aarch64.cljc` 988/991): any other arity has no lowering and
+                  ;; must keep failing here rather than reaching a backend.
+                  ;;
+                  ;; Measured 2026-08-05 against kotoba-native
+                  ;; `5df4d85`: this clause ALONE unlocks nothing -- the same
+                  ;; two operations are refused a second time by
+                  ;; `kotoba.verifier/string-operations`, which re-derives its
+                  ;; own table. Both gates had to open; see this repo's ADR 0222.
+                  (and (= op 'string-contains?) (= 2 (count args)))
+                  (every? walk args)
+
+                  (and (= op 'string-replace-all) (= 3 (count args)))
+                  (every? walk args)
+
                   ;; `let` MUST be walked explicitly. Without this case it fell
                   ;; to `:else`, which walks `args` -- and the first arg is the
                   ;; binding VECTOR, which is not `seq?` (vectors never are),
