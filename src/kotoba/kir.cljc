@@ -2588,9 +2588,16 @@
                       kernel-load-u32 kernel-store-u32} op)
         (trap! :kernel-memory-unavailable {:operation op})
 
+        ;; `kernel-in-u8`/`kernel-in-u32` (x86 port reads) belong here for the
+        ;; same reason their write counterparts do, and one more: their VALUE
+        ;; is whatever a device put on the bus. There is no answer this
+        ;; interpreter could return that would be right, so it must refuse
+        ;; rather than invent one -- the alternative would let the oracle
+        ;; "confirm" a device read off-hardware.
         (contains? '#{kernel-boot-info kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-cli kernel-sti kernel-hlt kernel-pause
-                      kernel-out-u8 kernel-out-u32} op)
+                      kernel-out-u8 kernel-out-u32
+                      kernel-in-u8 kernel-in-u32} op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -2790,7 +2797,8 @@
                              kernel-load-u32 kernel-store-u32
                              kernel-boot-info kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-cli kernel-sti kernel-hlt kernel-pause
-                             kernel-out-u8 kernel-out-u32}
+                             kernel-out-u8 kernel-out-u32
+                             kernel-in-u8 kernel-in-u32}
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
