@@ -133,6 +133,7 @@
 ;; before `ir/lower` produced this HIR), just narrows it further to the
 ;; scalar-only field-type universe this native increment implements.
 (declare native-scalar-record-type?)
+(declare native-word-value-type?)
 
 (defn- native-scalar-record-type? [type]
   (and (vector? type) (= 3 (count type)) (= :record (first type))
@@ -146,6 +147,17 @@
        (every? (fn [field]
                  (and (vector? field) (= 2 (count field)) (keyword? (first field))
                       (or (contains? native-word-field-types (second field))
+                          ;; An `[:option T]`/`[:result T E]` field is admitted
+                          ;; for exactly the reason the word types above are: it
+                          ;; already travels as ONE word on both backends (the
+                          ;; pair handle `option-some-of`/`result-ok-of` build),
+                          ;; so it occupies a single flattened slot like any
+                          ;; other field and needs no representation the record
+                          ;; lowering does not already have. Without it a schema
+                          ;; as ordinary as `[[:mem [:option :i64]] [:tmax :i64]]`
+                          ;; -- murakumo's own `:join/clamp` -- was unrepresentable
+                          ;; while each of its parts was representable alone.
+                          (native-word-value-type? (second field))
                           (native-scalar-record-type? (second field)))))
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
@@ -196,6 +208,43 @@
                                 (native-word-value-type? (second type) (inc depth))
                                 (native-word-value-type? (nth type 2) (inc depth)))
                    false))))))
+
+;; A function-boundary type the native backends can carry in ONE machine word,
+;; or box into one.
+;;
+;; `param-types` and `result` are the only place a `[:ref :ns/name]` survives
+;; lowering -- every `record-get` in a body already carries its schema expanded
+;; (confirmed by reading a lowered body: `(record-get [:record :join/relay …] r
+;; :tier)`), so expansion is needed here and nowhere else.
+;;
+;; Records are admitted in BOTH directions now, not just as results. A record
+;; parameter travels exactly the way a record result already did -- boxed into
+;; the `pair` chain both backends have built since ADR 0062 -- so this adds no
+;; representation, no ABI change and no new primitive. It was the single thing
+;; standing between this backend and the pure planner cores real callers
+;; already ship: measured 2026-08-05, every one of murakumo's 33 `*_core.kotoba`
+;; modules that failed here failed on a record parameter, an `[:option T]`
+;; record field, or a `:bool` result -- never on anything in a body.
+;; A bare `:bool` PARAMETER is deliberately excluded, which is why this is not
+;; simply `native-word-field-types`. Measured 2026-08-05: `(defn f [b :bool] …)`
+;; is rejected by this namespace's own interpreter with
+;; `{:trap :value-type-mismatch :expected :i64 :position {:parameter b}}` --
+;; `execute` validates a `:bool` argument as an i64 word. That is a real gap,
+;; but it is in the INTERPRETER, not in either backend, and fixing it is a
+;; separate change with its own evidence. Admitting the type here while the
+;; oracle cannot run it would mean shipping a boundary nothing had executed.
+;; `:bool` remains available where it already worked: as a RESULT (the caller's
+;; own `#{:i64 :string :bool}` clause) and as a record FIELD (via
+;; `native-word-field-types`, unchanged).
+(defn- native-boundary-type? [type schemas]
+  (let [type (if (and (vector? type) (= 2 (count type)) (= :ref (first type))
+                      (keyword? (second type)))
+               (get schemas (second type) type)
+               type)]
+    (and (not= :bool type)
+         (or (contains? #{:i64 :string :keyword} type)
+             (native-word-value-type? type)
+             (native-scalar-record-type? type)))))
 
 (defn only-native-word-typed-features? [hir]
   (letfn [(walk [form]
@@ -467,8 +516,9 @@
                   (and (not (contains? non-string-typed-ops op))
                        (every? walk args))))
               :else true))]
-    (every? (fn [{:keys [param-types result body name]}]
-              (and (every? #{:i64 :string} param-types)
+    (let [schemas (:schemas hir)]
+      (every? (fn [{:keys [param-types result body name]}]
+              (and (every? #(native-boundary-type? % schemas) param-types)
                    ;; An INTERNAL function may also RETURN a record. It crosses
                    ;; the boundary boxed as a pair chain -- one word, built from
                    ;; the arena primitives this backend has always had -- which
@@ -480,12 +530,13 @@
                    ;; same split `kotoba.verifier` draws between its
                    ;; entry-result-types and function-result-types, and a
                    ;; deliberate negative in the compiler's own frontend
-                   ;; extensions test pins it.
-                   (or (contains? #{:i64 :string} result)
+                   ;; extensions test pins it. The same reasoning excludes an
+                   ;; option/result there: those are pair handles too.
+                   (or (contains? #{:i64 :string :bool} result)
                        (and (not= name (:entry hir))
-                            (native-scalar-record-type? result)))
+                            (native-boundary-type? result schemas)))
                    (walk body)))
-            (:functions hir))))
+            (:functions hir)))))
 
 (defn only-cljs-provider-typed-features?
   "True when typed values appear only as function boundary types and sealed
