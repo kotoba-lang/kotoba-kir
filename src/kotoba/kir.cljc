@@ -2638,11 +2638,19 @@
         ;; (EFER, the APIC base, the SYSCALL entry point), often written by
         ;; another core, and `rdmsr` faults outside ring 0 regardless. There
         ;; is nothing here that could be right.
+        ;; `kernel-cpuid-*` is the sharpest case of all. A `cpuid` result is a
+        ;; property of the MACHINE -- which CPU this is, and what it can do --
+        ;; and this interpreter is not running on the machine the artifact will
+        ;; run on. Answering would not merely invent a value: the six aiueos
+        ;; sites BRANCH on it, so an invented answer becomes "this CPU supports
+        ;; NX" decided by a compiler that has never seen the CPU. It refuses.
         (contains? '#{kernel-boot-info kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-cli kernel-sti kernel-hlt kernel-pause
                       kernel-out-u8 kernel-out-u32
                       kernel-in-u8 kernel-in-u32
-                      kernel-read-msr kernel-write-msr} op)
+                      kernel-read-msr kernel-write-msr
+                      kernel-cpuid-eax kernel-cpuid-ebx
+                      kernel-cpuid-ecx kernel-cpuid-edx} op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -2849,7 +2857,22 @@
                              ;; a module kernel-native and thereby suppresses
                              ;; constant-oracling. Without it the oracle would
                              ;; try to evaluate an `rdmsr` at compile time.
-                             kernel-read-msr kernel-write-msr}
+                             kernel-read-msr kernel-write-msr
+                             ;; And the `cpuid` four, where missing this set
+                             ;; would be worse than for `rdmsr`: their operands
+                             ;; are LITERALS at every real call site (leaf
+                             ;; 0x80000001, subleaf 0), so a constant-folder
+                             ;; sees an operation over two constants and has
+                             ;; every structural reason to try to evaluate it.
+                             ;; The interpreter above traps rather than
+                             ;; answering, so the failure would be loud rather
+                             ;; than silent -- but the trap would abort the
+                             ;; compile of a program that is perfectly valid.
+                             ;; A `cpuid` result is a property of the machine,
+                             ;; not of the program, and must survive to run
+                             ;; time no matter how constant its inputs look.
+                             kernel-cpuid-eax kernel-cpuid-ebx
+                             kernel-cpuid-ecx kernel-cpuid-edx}
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
