@@ -17,7 +17,8 @@
   EXECUTE a `:bool` parameter, in every position one can occupy, before the
   admission gate is allowed to admit one."
   (:require [clojure.test :refer [deftest is testing]]
-            [kotoba.kir :as kir]))
+            [kotoba.kir :as kir]
+            [kotoba.test-hir :as test-hir]))
 
 (defn- module
   "A one-function typed module whose single parameter `b` is a `:bool`."
@@ -166,16 +167,11 @@
                           :body '(if b 1 0)}
                          {:name 'main :params [] :param-types [] :result :i64
                           :body '(g true)}]}
-        lowered (kir/lower (assoc hir :format :kotoba.hir/v3))]
+        checked (test-hir/module (assoc hir :format :kotoba.hir/v3))
+        lowered (kir/lower checked)]
     (testing "v3 keeps the table and the oracle folds"
       (is (= [:bool] (:param-types (first (:functions lowered)))))
       (is (= 1 (:oracle-value lowered))))
-    (testing "without it, a host boolean is refused as an i64"
-      (try
-        (kir/lower hir)
-        (is false "expected the ADR 0219 trap")
-        (catch clojure.lang.ExceptionInfo error
-          (let [data (ex-data error)]
-            (is (= :value-type-mismatch (:trap data)))
-            (is (= :i64 (:expected data)))
-            (is (= {:function 'g :parameter 'b} (:position data)))))))))
+    (testing "without a HIR version, the inter-repository contract rejects first"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"missing-module-keys"
+                            (kir/lower (dissoc checked :format)))))))

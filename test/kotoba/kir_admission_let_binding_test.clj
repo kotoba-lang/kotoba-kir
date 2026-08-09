@@ -11,7 +11,8 @@
   directly and admitted when bound by a `let`, which is how `xorshift32`
   reached a native backend while the `u32-wrap` it desugars into was rejected."
   (:require [clojure.test :refer [deftest is testing]]
-            [kotoba.kir :as kir]))
+            [kotoba.kir :as kir]
+            [kotoba.test-hir :as test-hir]))
 
 (defn- hir [body]
   {:format :kotoba.hir/v3
@@ -145,10 +146,11 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- lowered [result body]
-  (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
-              :result result :effects #{}
-              :functions [{:name 'main :params [] :param-types [] :result result
-                           :effects #{} :body body}]}))
+  (kir/lower
+   (test-hir/module
+    {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+     :result result
+     :functions [{:name 'main :params [] :result result :body body}]})))
 
 (deftest a-pure-bool-entry-is-folded-and-sealed
   ;; Excluding :bool left a predicate entry with no sealed oracle at all, and
@@ -177,11 +179,14 @@
   ;; and not truthiness -- otherwise a predicate that folds to false would look
   ;; exactly like an entry that could not be folded at all.
   (is (seq (:blocks (lowered :bool '(= 1 2)))))
-  (is (empty? (:blocks (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
-                                   :result :i64 :effects #{[:cap/call 1]}
-                                   :functions [{:name 'main :params [] :param-types []
-                                                :result :i64 :effects #{[:cap/call 1]}
-                                                :body '(cap-call 1 0)}]})))
+  (is (empty? (:blocks
+               (kir/lower
+                (test-hir/module
+                 {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                  :result :i64
+                  :functions [{:name 'main :params [] :result :i64
+                               :effects #{[:cap/call 1]}
+                               :body '(cap-call 1 0)}]}))))
       "an effectful entry still gets no oracle"))
 
 ;; ---------------------------------------------------------------------------
@@ -189,10 +194,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- run [body]
-  (kir/execute (kir/lower {:format :kotoba.hir/v2 :entry 'main :exports ['main]
-                           :result :i64 :effects #{}
-                           :functions [{:name 'main :params [] :param-types []
-                                        :result :i64 :effects #{} :body body}]})
+  (kir/execute (kir/lower
+                (test-hir/module
+                 {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                  :result :i64
+                  :functions [{:name 'main :params []
+                               :result :i64 :body body}]}))
                'main []))
 
 (deftest bool-not-inverts-a-comparison

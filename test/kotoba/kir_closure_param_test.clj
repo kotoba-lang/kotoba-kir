@@ -1,34 +1,35 @@
 (ns kotoba.kir-closure-param-test
   (:require [clojure.test :refer [deftest is testing]]
-            [kotoba.kir :as kir]))
+            [kotoba.kir :as kir]
+            [kotoba.test-hir :as test-hir]))
 
 (defn- hir-with-consumer [closure-expr]
-  {:format :kotoba.hir/v3
-   :entry 'main
-   :exports ['main]
-   :result :i64
-   :effects #{}
-   :functions
-   [{:name 'main :params [] :param-types [] :result :i64 :effects #{}
-     :body '(consume (make))}
-    {:name 'make :params [] :param-types [] :closure-result? true
-     :result :i64 :effects #{} :body closure-expr}
-    {:name 'consume :params ['closure] :param-types [:i64]
-     :closure-param-indexes [0]
-     :result :i64 :effects #{} :body '(pair-first closure)}]})
+  (test-hir/module
+   {:format :kotoba.hir/v3
+    :entry 'main
+    :exports ['main]
+    :result :i64
+    :functions
+    [{:name 'main :params [] :param-types [] :result :i64
+      :body '(consume (make))}
+     {:name 'make :params [] :param-types [] :closure-result? true
+      :result :i64 :body closure-expr}
+     {:name 'consume :params ['closure] :param-types [:i64]
+      :closure-param-indexes [0]
+      :result :i64 :body '(pair-first closure)}]}))
 
 (defn- hir-with-pair-chain-consumer [chain-expr]
-  {:format :kotoba.hir/v3
-   :entry 'main
-   :exports ['main]
-   :result :i64
-   :effects #{}
-   :functions
-   [{:name 'main :params [] :param-types [] :result :i64 :effects #{}
-     :body (list 'consume chain-expr)}
-    {:name 'consume :params ['args] :param-types [:i64]
-     :i64-pair-chain-param-indexes [0]
-     :result :i64 :effects #{} :body '(pair-first args)}]})
+  (test-hir/module
+   {:format :kotoba.hir/v3
+    :entry 'main
+    :exports ['main]
+    :result :i64
+    :functions
+    [{:name 'main :params [] :param-types [] :result :i64
+      :body (list 'consume chain-expr)}
+     {:name 'consume :params ['args] :param-types [:i64]
+      :i64-pair-chain-param-indexes [0]
+      :result :i64 :body '(pair-first args)}]}))
 
 (deftest lower-preserves-and-executes-closure-parameter-refinements
   (let [lowered (kir/lower (hir-with-consumer '(pair 7 0)))
@@ -42,7 +43,7 @@
   (doseq [indexes [[1] [0 0] [0 -1] ["0"]]]
     (testing (pr-str indexes)
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"closure parameter indexes are malformed"
+           clojure.lang.ExceptionInfo #"invalid-parameter-indexes"
            (kir/lower
             (assoc-in (hir-with-consumer '(pair 7 0))
                       [:functions 2 :closure-param-indexes] indexes)))))))
@@ -51,7 +52,8 @@
   (doseq [value [false 1 :yes]]
     (testing (pr-str value)
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"closure result refinement is malformed"
+           clojure.lang.ExceptionInfo
+           #"(closure result refinement is malformed|invalid-boolean-annotation)"
            (kir/lower
             (assoc-in (hir-with-consumer '(pair 7 0))
                       [:functions 1 :closure-result?] value))))))
@@ -82,7 +84,7 @@
   (doseq [indexes [[1] [0 0] [0 -1] ["0"]]]
     (testing (pr-str indexes)
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo #"i64 pair-chain parameter indexes are malformed"
+           clojure.lang.ExceptionInfo #"invalid-parameter-indexes"
            (kir/lower
             (assoc-in (hir-with-pair-chain-consumer '(pair 7 0))
                       [:functions 1 :i64-pair-chain-param-indexes] indexes))))))

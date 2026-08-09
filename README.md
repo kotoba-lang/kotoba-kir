@@ -17,11 +17,13 @@ checkable from outside.
 ## Does not own
 
 - parse .kotoba source
+- define or validate the checked HIR envelope
 - emit machine code or wasm
 - decide policy
 
 ## Depends on
 
+- `kotoba-lang/kotoba-hir`
 - `kotoba-lang/security`
 
 ## Test

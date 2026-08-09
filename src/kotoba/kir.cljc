@@ -7,6 +7,7 @@
   ;; validation ("Extra input spec: :clojure.core.specs.alpha/ns-form",
   ;; confirmed live).
   (:require [clojure.string :as str]
+            [kotoba.hir :as hir]
             [kotoba.kir.value :as value]
             [kotoba.kir.decimal :as decimal]
             [kotoba.kir.xml :as xml]
@@ -2844,6 +2845,7 @@
           (box-bool (invoke)))))))
 
 (defn lower [hir]
+  (hir/validate! hir)
   (let [kernel-operations '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                              kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
                              kernel-subregion
