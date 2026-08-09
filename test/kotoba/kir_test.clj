@@ -8,6 +8,14 @@
             [kotoba.kir.compatibility]
             [kotoba.kir.admission]))
 
+(def valid-hir
+  {:format :kotoba.hir/v2
+   :namespace nil :schemas nil :schema-identities nil
+   :entry 'main :exports ['main] :result :i64
+   :effects #{} :named-operations #{} :language-profile nil
+   :functions [{:name 'main :params [] :result :i64
+                :effects #{} :body 0}]})
+
 ;; Load gate: the split must not break namespace resolution. Each extracted
 ;; namespace must load standalone from this repo's own dependency closure.
 (deftest every-extracted-namespace-loads
@@ -27,3 +35,11 @@
           :ambient-wasi false}
          (select-keys (target/profile :wasm-component-kotoba-v2)
                       [:execution :abi :runtime :wasi-version :ambient-wasi]))))
+
+(deftest lowering-rejects-malformed-hir-before-consuming-it
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unknown-module-keys"
+                        (kotoba.kir/lower (assoc valid-hir :private true))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"module-effects-mismatch"
+                        (kotoba.kir/lower
+                         (assoc-in valid-hir [:functions 0 :effects]
+                                   #{[:cap/call 7]})))))
