@@ -7,4 +7,11 @@
   :tier :t0
   :role :contract
   :must-not [:parse-kotoba-source :emit-machine-code-or-wasm :decide-policy]
-  :depends-on ["kotoba-lang/security"]}}
+  :depends-on ["kotoba-lang/security"
+               ;; 2026-08-10 の IR 境界抽出で production 依存に入ったが宣言が
+               ;; 追従していなかった。fleet の root-repository-roles gate が
+               ;; missing-from-rule で赤にしていた（amu も同じ形で、そちらは
+               ;; c2ff8799 で解消済み）。
+               "kotoba-lang/dag-cbor"
+               "kotoba-lang/io-multiformats"
+               "kotoba-lang/kotoba-hir"]}}
