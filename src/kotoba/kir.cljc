@@ -283,6 +283,19 @@
         (native-word-value-type? type)
         (native-scalar-record-type? type))))
 
+(defn- native-private-handle-type? [type]
+  ;; Native vectors and string indexes are context-owned handles. They are one
+  ;; machine word at an internal call boundary, but they are not a host ABI:
+  ;; an external caller cannot construct, validate, inspect, or release one
+  ;; through a kexe export.
+  ;; Keep this deliberately non-recursive so option/result ownership is not
+  ;; widened as a side effect.
+  (contains? #{:vector-i64 :vector-f64 :string-index} type))
+
+(defn- native-function-boundary-type? [type schemas exported?]
+  (or (native-boundary-type? type schemas)
+      (and (not exported?) (native-private-handle-type? type))))
+
 (defn only-native-word-typed-features? [hir]
   (letfn [(walk [form]
             (cond
@@ -555,6 +568,22 @@
                   (and (= op 'string-replace-all) (= 3 (count args)))
                   (every? walk args)
 
+                  ;; A native string-index is lowered by kotoba-native into a
+                  ;; private alternating key-handle/value vector. The five
+                  ;; observable operations stay here in Kotoba machine code;
+                  ;; no graph callback or context ABI slot is introduced.
+                  (= op 'string-index-new)
+                  (empty? args)
+
+                  (= op 'string-index-count)
+                  (and (= 1 (count args)) (walk (first args)))
+
+                  (contains? '#{string-index-contains string-index-get} op)
+                  (and (= 2 (count args)) (every? walk args))
+
+                  (= op 'string-index-assoc)
+                  (and (= 3 (count args)) (every? walk args))
+
                   ;; `let` MUST be walked explicitly. Without this case it fell
                   ;; to `:else`, which walks `args` -- and the first arg is the
                   ;; binding VECTOR, which is not `seq?` (vectors never are),
@@ -591,9 +620,12 @@
                   (and (not (contains? non-string-typed-ops op))
                        (every? walk args))))
               :else true))]
-    (let [schemas (:schemas hir)]
+    (let [schemas (:schemas hir)
+          exports (set (:exports hir))]
       (every? (fn [{:keys [param-types result body name]}]
-              (and (every? #(native-boundary-type? % schemas) param-types)
+                (let [exported? (contains? exports name)]
+                  (and (every? #(native-function-boundary-type? % schemas exported?)
+                                param-types)
                    ;; An INTERNAL function may also RETURN a record. It crosses
                    ;; the boundary boxed as a pair chain -- one word, built from
                    ;; the arena primitives this backend has always had -- which
@@ -609,8 +641,8 @@
                    ;; option/result there: those are pair handles too.
                    (or (contains? #{:i64 :string :bool} result)
                        (and (not= name (:entry hir))
-                            (native-boundary-type? result schemas)))
-                   (walk body)))
+                            (native-function-boundary-type? result schemas exported?)))
+                       (walk body))))
             (:functions hir)))))
 
 (defn only-cljs-provider-typed-features?
