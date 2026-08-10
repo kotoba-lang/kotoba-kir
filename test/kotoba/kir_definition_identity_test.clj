@@ -30,6 +30,16 @@
                      (assoc definition :definition/interface {:arity 1})]]
       (is (not= base (identity/definition-cid changed))))))
 
+(deftest extracted-literal-wrappers-preserve-the-v2-wire-contract
+  (is (= {:kotoba.lang.code-identity/i64 "9007199254740993"}
+         (identity/i64 9007199254740993)))
+  (is (= ["int" "9007199254740993"]
+         (identity/normalize (identity/i64 9007199254740993))))
+  (is (= {:kotoba.lang.code-identity/f64 "3ff8000000000000"}
+         (identity/f64 1.5)))
+  (is (= ["f64" "3ff8000000000000"]
+         (identity/normalize (identity/f64 1.5)))))
+
 (deftest canonical-domain-fails-closed
   (testing "map and set source order is not identity"
     (is (= (identity/normalize {:a 1 :b 2})

@@ -115,12 +115,19 @@
   "2^53 - 1: the largest integer a ClojureScript number represents exactly."
   9007199254740991)
 
+;; These keys are part of payload-v2's admitted source representation. They
+;; deliberately retain the namespace of the pre-extraction authority: changing
+;; them to auto-resolved ::f64/::i64 under this namespace would reinterpret old
+;; frozen definitions as ordinary maps and therefore move their DefCIDs.
+(def ^:private f64-wrapper-key :kotoba.lang.code-identity/f64)
+(def ^:private i64-wrapper-key :kotoba.lang.code-identity/i64)
+
 (defn f64
   "The admitted representation of an f64 literal inside typed KIR: a map
   carrying the exact IEEE-754 bits as 16 hex characters. Use this rather than
   a platform float — see `normalize`."
   [d]
-  {::f64 (f64-bits-hex d)})
+  {f64-wrapper-key (f64-bits-hex d)})
 
 (defn i64
   "The admitted representation of an i64 literal outside ±(2^53-1): a map
@@ -135,20 +142,21 @@
 
   `(i64 5)` and `5` denote the same value and therefore share one identity."
   [n]
-  {::i64 (str n)})
+  {i64-wrapper-key (str n)})
 
 (defn- f64-literal? [x]
   (and (map? x)
        (= 1 (count x))
-       (string? (::f64 x))
-       (= 16 (count (::f64 x)))
-       (every? (fn [c] (str/includes? "0123456789abcdefABCDEF" (str c))) (::f64 x))))
+       (string? (get x f64-wrapper-key))
+       (= 16 (count (get x f64-wrapper-key)))
+       (every? (fn [c] (str/includes? "0123456789abcdefABCDEF" (str c)))
+               (get x f64-wrapper-key))))
 
 (defn- i64-literal? [x]
   (and (map? x)
        (= 1 (count x))
-       (string? (::i64 x))
-       (re-matches #"-?(0|[1-9][0-9]*)" (::i64 x))))
+       (string? (get x i64-wrapper-key))
+       (re-matches #"-?(0|[1-9][0-9]*)" (get x i64-wrapper-key))))
 
 (declare normalize)
 
@@ -209,12 +217,12 @@
     ;; make the same KIR encode differently per implementation. The explicit
     ;; form is the only admitted representation, and `f64-bits-hex` exists so
     ;; a frontend can produce it.
-    (f64-literal? value) ["f64" (str/lower-case (::f64 value))]
+    (f64-literal? value) ["f64" (str/lower-case (get value f64-wrapper-key))]
 
     ;; Same tag as a plain integer: `(i64 5)` and `5` denote one value, so they
     ;; must share one identity. The wrapper is about how the value survives a
     ;; reader, not about what it means.
-    (i64-literal? value) ["int" (::i64 value)]
+    (i64-literal? value) ["int" (get value i64-wrapper-key)]
 
     (number? value)
     (throw (ex-info "raw platform float is outside the canonical identity domain; carry f64 as {:kotoba.kir.definition-identity/f64 \"<16 hex>\"}"
