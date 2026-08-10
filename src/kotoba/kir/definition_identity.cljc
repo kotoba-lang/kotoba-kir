@@ -270,8 +270,24 @@
      {:valid? false :message "definition profile version must be positive integer"})
    (when-not (pos-int? (:definition/desugar-contract-version definition))
      {:valid? false :message "definition desugar contract version must be positive integer"})
+   ;; `map?` alone let ANY map through, which is not a small looseness: the
+   ;; identity's whole claim is that it addresses typed KIR, and a caller that
+   ;; handed it something else — a compiler function record, an interface map,
+   ;; a bag of metadata — got a CID back that looks canonical and seals a shape
+   ;; no other implementation produces. Measured 2026-08-10: passing a
+   ;; compiler function map was accepted here, and the compiler's KIR keeps
+   ;; bodies as source forms rather than IR nodes, so that was the likely
+   ;; mistake rather than a hypothetical one.
+   ;;
+   ;; An IR node is a map with an `:op`. Every frozen vector and every
+   ;; conformance fixture already satisfies this; nothing that was admitted
+   ;; before is rejected now, and nothing that was rejected is admitted. The
+   ;; encoding is untouched, so no existing CID moves.
    (when-not (map? (:definition/kir definition))
      {:valid? false :message "definition typed KIR map required"})
+   (when-not (contains? (:definition/kir definition) :op)
+     {:valid? false
+      :message "definition typed KIR must be an IR node with :op, not an arbitrary map"})
    (effect-row-problem (:definition/effect-row definition))
    (when-not (map? (:definition/interface definition))
      {:valid? false :message "definition interface map required"})
