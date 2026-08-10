@@ -13,6 +13,7 @@ checkable from outside.
 - `kotoba.kir (KIR v3/v4 shape + lowering budget)`
 - `kotoba.kir.value (portable value model)`
 - `kotoba.kir.target (target profile registry)`
+- `kotoba.kir.definition-identity (canonical DAG-CBOR DefCID)`
 
 ## Does not own
 
