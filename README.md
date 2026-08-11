@@ -14,6 +14,8 @@ checkable from outside.
 - `kotoba.kir.value (portable value model)`
 - `kotoba.kir.target (target profile registry)`
 - `kotoba.kir.definition-identity (canonical DAG-CBOR DefCID)`
+- native typed-feature admission, including the closed scalar-variant export
+  boundary (`qualified name`, `1..32` unique cases, `:i64`/`:bool` payloads)
 
 ## Does not own
 
