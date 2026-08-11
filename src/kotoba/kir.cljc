@@ -193,6 +193,21 @@
                (nth type 2))
        (= (count (nth type 2)) (count (distinct (map first (nth type 2)))))))
 
+(defn- native-boundary-scalar-variant-type? [type]
+  ;; The public kexe boundary owns a deliberately smaller representation than
+  ;; the expression evaluator: declaration ordinal + one scalar payload in a
+  ;; context-owned pair handle. Nested record payloads remain local-only.
+  (and (vector? type) (= 3 (count type)) (= :variant (first type))
+       (keyword? (second type)) (some? (namespace (second type)))
+       (vector? (nth type 2)) (<= 1 (count (nth type 2)) 32)
+       (every? (fn [case-entry]
+                 (and (vector? case-entry) (= 2 (count case-entry))
+                      (keyword? (first case-entry))
+                      (contains? #{:i64 :bool} (second case-entry))))
+               (nth type 2))
+       (= (count (nth type 2))
+          (count (distinct (map first (nth type 2)))))))
+
 (defn- native-word-value-type?
   "Types whose runtime value fits the native backend's uniform 64-bit word.
   Structured option/result values are pair handles, so they compose
@@ -281,7 +296,8 @@
         ;; has always listed it, and the `(not= :bool type)` guard that used to
         ;; wrap this whole `or` is what withheld it.
         (native-word-value-type? type)
-        (native-scalar-record-type? type))))
+        (native-scalar-record-type? type)
+        (native-boundary-scalar-variant-type? type))))
 
 (defn- native-private-handle-type? [type]
   ;; Native vectors and string indexes are context-owned handles. They are one
