@@ -1627,8 +1627,7 @@
 
         (= op 'string=?)
         (let [[left right] (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
-          #?(:clj (if (= left right) 1 0)
-             :cljs (if (= left right) i64/one i64/zero)))
+          (= left right))
 
         (= op 'string-concat)
         (let [[left right] (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
@@ -1656,8 +1655,7 @@
         (let [[haystack needle]
               (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           (when (empty? needle) (trap! :empty-string-search-needle {}))
-          #?(:clj (if (str/includes? haystack needle) 1 0)
-             :cljs (if (str/includes? haystack needle) i64/one i64/zero)))
+          (str/includes? haystack needle))
 
         ;; T4.2: number of segments when splitting haystack by non-empty sep
         ;; (non-overlapping). Empty separator traps. Matches JS split length
