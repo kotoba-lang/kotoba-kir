@@ -208,6 +208,23 @@
        (= (count (nth type 2))
           (count (distinct (map first (nth type 2)))))))
 
+(def ^:private native-clock-request-type
+  [:variant :kotoba.clock/request [[:wall :bool] [:monotonic :bool]]])
+
+(def ^:private native-clock-result-type
+  [:variant :kotoba.clock/result
+   [[:wall [:record :kotoba.clock/wall
+            [[:unix-millis :i64] [:observation-sequence :i64]]]]
+    [:monotonic [:record :kotoba.clock/monotonic
+                 [[:nanos :i64] [:observation-sequence :i64]]]]
+    [:error [:record :kotoba.clock/error
+             [[:code :keyword] [:message :string]]]]]])
+
+(defn- native-provider-contract? [cap-id request-type result-type]
+  (and (= 7 cap-id)
+       (= native-clock-request-type request-type)
+       (= native-clock-result-type result-type)))
+
 (defn- native-word-value-type?
   "Types whose runtime value fits the native backend's uniform 64-bit word.
   Structured option/result values are pair handles, so they compose
@@ -400,10 +417,11 @@
                          #?(:clj (integer? cap-id)
                             :cljs (or (i64/bigint-value? cap-id) (integer? cap-id)))
                          (<= 0 cap-id 255)
-                         (contains? #{[:i64 :i64] [:string :string]
-                                      [:option-i64 :option-i64]
-                                      [:result-i64 :result-i64]}
-                                    [request-type result-type])
+                         (or (contains? #{[:i64 :i64] [:string :string]
+                                          [:option-i64 :option-i64]
+                                          [:result-i64 :result-i64]}
+                                        [request-type result-type])
+                             (native-provider-contract? cap-id request-type result-type))
                          (walk request)))
                   ;; f64 scalar arithmetic on native (ADR-2608030300). Same
                   ;; reasoning as `i32-operations` above: no new value
