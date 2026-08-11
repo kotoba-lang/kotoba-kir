@@ -137,6 +137,18 @@
     (is (true? (kir/only-native-word-typed-features? hir))
         "a :bool parameter is a one-word boundary type like every other scalar here")))
 
+(deftest the-native-gate-admits-canonical-monomorphic-option-result-boundaries
+  (let [hir {:format :kotoba.hir/v3 :entry nil
+             :exports ['echo-option 'echo-result]
+             :functions [{:name 'echo-option :params ['value]
+                          :param-types [:option-i64] :result :option-i64
+                          :body 'value}
+                         {:name 'echo-result :params ['value]
+                          :param-types [:result-i64] :result :result-i64
+                          :body 'value}]}]
+    (is (true? (kir/only-native-word-typed-features? hir))
+        "both established tagged pair aliases are one-word export boundaries")))
+
 (deftest the-native-gate-still-refuses-what-it-always-refused
   ;; Widening one type must not widen the set by accident. `:f64` is a word too,
   ;; but it is not a word this boundary carries.
