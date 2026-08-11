@@ -2711,7 +2711,8 @@
         ;; run on. Answering would not merely invent a value: the six aiueos
         ;; sites BRANCH on it, so an invented answer becomes "this CPU supports
         ;; NX" decided by a compiler that has never seen the CPU. It refuses.
-        (contains? '#{kernel-boot-info kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
+        (contains? '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
+                      kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-cli kernel-sti kernel-hlt kernel-pause
                       kernel-out-u8 kernel-out-u32
                       kernel-in-u8 kernel-in-u32
@@ -2916,7 +2917,8 @@
                              kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
                              kernel-subregion
                              kernel-load-u32 kernel-store-u32
-                             kernel-boot-info kernel-read-cr3 kernel-write-cr3 kernel-invlpg
+                             kernel-boot-info kernel-read-cr0 kernel-write-cr0
+                             kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-cli kernel-sti kernel-hlt kernel-pause
                              kernel-out-u8 kernel-out-u32
                              kernel-in-u8 kernel-in-u32
