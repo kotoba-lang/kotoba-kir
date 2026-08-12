@@ -2711,8 +2711,11 @@
         ;; NX" decided by a compiler that has never seen the CPU. It refuses.
         (contains? '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
                       kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
-                      kernel-read-cs kernel-page-fault-handler-address kernel-load-idt
+                      kernel-read-cs kernel-page-fault-handler-address
+                      kernel-page-fault-recovery-handler-address
+                      kernel-configure-page-fault-recovery kernel-load-idt
                       kernel-probe-guard-write kernel-probe-text-write kernel-probe-nx-execute
+                      kernel-probe-recoverable-guard-write
                       kernel-cli kernel-sti kernel-hlt kernel-pause
                       kernel-out-u8 kernel-out-u32
                       kernel-in-u8 kernel-in-u32
@@ -2919,8 +2922,11 @@
                              kernel-load-u32 kernel-store-u32
                              kernel-boot-info kernel-read-cr0 kernel-write-cr0
                              kernel-read-cr3 kernel-write-cr3 kernel-invlpg
-                             kernel-read-cs kernel-page-fault-handler-address kernel-load-idt
+                             kernel-read-cs kernel-page-fault-handler-address
+                             kernel-page-fault-recovery-handler-address
+                             kernel-configure-page-fault-recovery kernel-load-idt
                              kernel-probe-guard-write kernel-probe-text-write kernel-probe-nx-execute
+                             kernel-probe-recoverable-guard-write
                              kernel-cli kernel-sti kernel-hlt kernel-pause
                              kernel-out-u8 kernel-out-u32
                              kernel-in-u8 kernel-in-u32
