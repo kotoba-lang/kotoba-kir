@@ -329,6 +329,11 @@
   (or (native-boundary-type? type schemas)
       (and (not exported?) (native-private-handle-type? type))))
 
+(defn- native-export-copy-result-type? [type]
+  ;; KEXE export copy ABI v1 initially owns only top-level vector results.
+  ;; Parameters still cannot be handles, and string-index has no wire form.
+  (contains? #{:vector-i64 :vector-f64} type))
+
 (defn only-native-word-typed-features? [hir]
   (letfn [(walk [form]
             (cond
@@ -656,7 +661,7 @@
               :else true))]
     (let [schemas (:schemas hir)
           exports (set (:exports hir))]
-      (every? (fn [{:keys [param-types result body name]}]
+      (every? (fn [{:keys [params param-types result body name]}]
                 (let [exported? (contains? exports name)]
                   (and (every? #(native-function-boundary-type? % schemas exported?)
                                 param-types)
@@ -674,6 +679,10 @@
                    ;; extensions test pins it. The same reasoning excludes an
                    ;; option/result there: those are pair handles too.
                    (or (contains? #{:i64 :string :bool} result)
+                       (and exported?
+                            (not= name (:entry hir))
+                            (empty? params)
+                            (native-export-copy-result-type? result))
                        (and (not= name (:entry hir))
                             (native-function-boundary-type? result schemas exported?)))
                        (walk body))))
