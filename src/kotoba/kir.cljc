@@ -126,7 +126,7 @@
 ;; `keyword-from-string` wanted a general substring and concatenation over a
 ;; runtime handle; both landed 2026-08-04, so both operations are admitted
 ;; below and each backend desugars into exactly them.
-(def ^:private native-word-field-types #{:i64 :bool :string :keyword})
+(def ^:private native-word-field-types #{:i64 :bool :string :keyword :document})
 
 ;; Structural shape check only (`[:record :qualified/kw [[:field :type] ...]]`)
 ;; -- deliberately does not re-derive `kotoba.compiler.frontend`'s own
@@ -220,19 +220,48 @@
     [:error [:record :kotoba.clock/error
              [[:code :keyword] [:message :string]]]]]])
 
+(def ^:private native-dataspace-request-type
+  [:variant :kotoba.dataspace/request
+   [[:assert [:record :kotoba.dataspace/assert
+              [[:assertion :document] [:facet :i64]]]]
+    [:retract [:record :kotoba.dataspace/retract
+               [[:assertion :document] [:facet :i64]]]]
+    [:observe [:record :kotoba.dataspace/observe
+               [[:pattern :document] [:facet :i64]]]]
+    [:facet-enter :bool]
+    [:facet-leave :i64]]])
+
+(def ^:private native-dataspace-result-type
+  [:variant :kotoba.dataspace/result
+   [[:asserted [:record :kotoba.dataspace/asserted
+                [[:count :i64] [:notices :document]]]]
+    [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+    [:matches [:record :kotoba.dataspace/matches
+               [[:bindings :document] [:notices :document]]]]
+    [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+    [:error [:record :kotoba.dataspace/error
+             [[:code :keyword] [:message :string]]]]]])
+
 (defn- native-provider-contract? [cap-id request-type result-type]
-  (and (= 7 cap-id)
-       (= native-clock-request-type request-type)
-       (= native-clock-result-type result-type)))
+  (or (and (= 7 cap-id)
+           (= native-clock-request-type request-type)
+           (= native-clock-result-type result-type))
+      (and (= 24 cap-id)
+           (= native-dataspace-request-type request-type)
+           (= native-dataspace-result-type result-type))))
 
 (defn- native-word-value-type?
   "Types whose runtime value fits the native backend's uniform 64-bit word.
   Structured option/result values are pair handles, so they compose
-  recursively without changing the machine ABI."
+  recursively without changing the machine ABI.
+  `:document` is the same width as `:string`: a pair(offset,length) over
+  canonical UTF-8 EDN bytes. That is a backend representation, not the
+  application programming model."
   ([type] (native-word-value-type? type 0))
   ([type depth]
    (and (<= depth 8)
-        (or (contains? #{:i64 :bool :string :option-i64 :result-i64} type)
+        (or (contains? #{:i64 :bool :string :keyword :document
+                         :option-i64 :result-i64} type)
             (and (vector? type)
                  (case (first type)
                    :option (and (= 2 (count type))
@@ -601,6 +630,16 @@
 
                   (and (= op 'string-replace-all) (= 3 (count args)))
                   (every? walk args)
+
+                  ;; Native `:document` is a string-shaped pair handle over
+                  ;; UTF-8 EDN bytes. These two ops stay in
+                  ;; `non-string-typed-ops` (the CLJS gate shares that set)
+                  ;; and are admitted here only: they cost no new ABI word.
+                  (and (= op 'document-edn-read) (= 1 (count args)))
+                  (walk (first args))
+
+                  (and (= op 'document-edn-print) (= 1 (count args)))
+                  (walk (first args))
 
                   ;; A native string-index is lowered by kotoba-native into a
                   ;; private alternating key-handle/value vector. The five
