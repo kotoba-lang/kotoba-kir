@@ -2734,9 +2734,17 @@
               option-type [:option type]]
           (if (= tag (name type)) [option-type true payload] [option-type false]))
 
+        ;; `kernel-try-lock-u32`/`kernel-unlock-u32` belong here for the same
+        ;; reason the loads and stores do, and one more. Their VALUE is
+        ;; whether this caller won a race, which is a property of the machine
+        ;; at run time and of nothing this interpreter can see. Answering
+        ;; would not merely invent a value: every call site branches on it, so
+        ;; an invented answer becomes "the lock was free" decided by a
+        ;; compiler that has never seen the memory. It refuses.
         (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                       kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32} op)
+                      kernel-load-u32 kernel-store-u32
+                      kernel-try-lock-u32 kernel-unlock-u32} op)
         (trap! :kernel-memory-unavailable {:operation op})
 
         ;; `kernel-in-u8`/`kernel-in-u32` (x86 port reads) belong here for the
@@ -2970,6 +2978,14 @@
                              kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
                              kernel-subregion
                              kernel-load-u32 kernel-store-u32
+                             ;; The lock pair marks a module kernel-native for
+                             ;; the same reason the MSR pair does: without it
+                             ;; the constant oracle would try to evaluate an
+                             ;; atomic read-modify-write at compile time. The
+                             ;; interpreter above traps rather than answering,
+                             ;; so the failure would be loud -- but it would
+                             ;; abort the compile of a valid program.
+                             kernel-try-lock-u32 kernel-unlock-u32
                              kernel-boot-info kernel-read-cr0 kernel-write-cr0
                              kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-read-cs kernel-page-fault-handler-address
