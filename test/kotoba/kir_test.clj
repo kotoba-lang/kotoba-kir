@@ -47,7 +47,8 @@
                       [:execution :isa :abi :runtime :evm-revision
                        :ambient-precompiles])))
   (is (= :evm256-kotoba-v1 (target/backend :evm256-kotoba-v1)))
-  (is (contains? target/compatibility-targets :evm256-kotoba-v1)))
+  (is (not (contains? target/compatibility-targets :evm256-kotoba-v1))
+      "the bounded first slice must not claim whole-language parity"))
 
 (deftest lowering-rejects-malformed-hir-before-consuming-it
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unknown-module-keys"
