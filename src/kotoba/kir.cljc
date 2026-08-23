@@ -21,6 +21,19 @@
 (def ^:private default-pair-capacity 4096)
 (def ^:private default-kgraph-capacity 4096)
 (def ^:dynamic *runtime-schemas* nil)
+(def ^:dynamic *value-call* nil)
+
+(def value-runtime-operations
+  "Host-bound transport operations implemented by :kotoba.value-runtime/v1.
+
+  These names do not carry or mint authority. A host adapter for persistent
+  intern/hydrate must itself be constructed from admitted object capabilities;
+  native admission stays closed until aiueos can prove that binding."
+  {'value-intern  {:abi-op :value/intern :argument :bytes :result :i64}
+   'value-hydrate {:abi-op :value/hydrate :argument :string :result :i64}
+   'value-resolve {:abi-op :value/resolve :argument :i64 :result :bytes}
+   'value-cid-of  {:abi-op :value/cid-of :argument :i64 :result :string}
+   'value-release {:abi-op :value/release :argument :i64 :result :i64}})
 
 ;; Shared between `kotoba.compiler.core` (JVM `clojure -M:run` path) and
 ;; `kotoba.compiler.nbb.cli` (nbb-native fast path) -- both admit
@@ -63,6 +76,7 @@
      variant-new variant-match
      option-some-of option-none-of option-some?-of option-value-of option-match
      typed-list-new bytes-empty
+     value-intern value-hydrate value-resolve value-cid-of value-release
      hetero-vector-new hetero-vector-count hetero-vector-at hetero-vector-assoc hetero-vector-equal
      typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal typed-set-nth
      typed-map-new typed-map-count typed-map-contains typed-map-get
@@ -1501,6 +1515,20 @@
                                      result-type
                                      {:capability cap-id :boundary :result})))
 
+        (contains? value-runtime-operations op)
+        (let [{:keys [abi-op argument result]} (get value-runtime-operations op)
+              _ (when-not (= 1 (count args))
+                  (trap! :value-runtime-arity
+                         {:operation abi-op :expected 1 :actual (count args)}))
+              _ (when-not *value-call*
+                  (trap! :value-runtime-unavailable {:operation abi-op}))
+              input (eval-expr (first args) env functions fuel heap call-stack cap-call)
+              _ (validate-runtime-value! input argument
+                                         {:operation abi-op :boundary :request})
+              output (*value-call* abi-op input)]
+          (validate-runtime-value! output result
+                                   {:operation abi-op :boundary :result}))
+
         (= op 'pair)
         (let [[left right] (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           (allocate-pair! heap left right))
@@ -2656,7 +2684,8 @@
 
         (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                       kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32} op)
+                      kernel-load-u32 kernel-store-u32
+                      kernel-compare-exchange-u32} op)
         (trap! :kernel-memory-unavailable {:operation op})
 
         ;; `kernel-in-u8`/`kernel-in-u32` (x86 port reads) belong here for the
@@ -2677,7 +2706,7 @@
         ;; run on. Answering would not merely invent a value: the six aiueos
         ;; sites BRANCH on it, so an invented answer becomes "this CPU supports
         ;; NX" decided by a compiler that has never seen the CPU. It refuses.
-        (contains? '#{kernel-boot-info kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
+        (contains? '#{kernel-boot-info kernel-publish-current-domain kernel-value-runtime-capability-table kernel-value-provider-queue kernel-value-runtime-arena kernel-value-runtime-cas-scratch kernel-publish-value-provider-status kernel-value-provider-status kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-cli kernel-sti kernel-hlt kernel-pause
                       kernel-out-u8 kernel-out-u32
                       kernel-in-u8 kernel-in-u32
@@ -2774,7 +2803,8 @@
   wraps modulo 2^64; bounded strings preserve Unicode text; invalid values,
   division, and resource exhaustion trap."
   ([kir function-name args] (execute kir function-name args {}))
-  ([kir function-name args {:keys [fuel cap-call typed-cap-call pair-capacity kgraph-capacity]
+  ([kir function-name args {:keys [fuel cap-call typed-cap-call value-call
+                                   pair-capacity kgraph-capacity]
                             :or {fuel default-fuel pair-capacity default-pair-capacity
                                  kgraph-capacity default-kgraph-capacity}}]
    (when (and (contains? kir :exports)
@@ -2791,6 +2821,9 @@
    (when-not (and (integer? kgraph-capacity) (<= 0 kgraph-capacity default-kgraph-capacity))
      (throw (ex-info "kgraph capacity is outside runtime limits"
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
+   (when-not (or (nil? value-call) (fn? value-call))
+     (throw (ex-info "value-call must be a function"
+                     {:phase :ir :value-call value-call})))
    (doseq [function (:functions kir)]
      (validated-closure-param-indexes function)
      (validated-i64-pair-chain-param-indexes function)
@@ -2836,7 +2869,8 @@
          :disjoint-set-i64 (value/bounded-disjoint-set-i64! arg)
          :document (value/bounded-document! arg)
          (value/bounded-typed-value! type arg))))
-     (let [invoke #(binding [*runtime-schemas* (:schemas kir)]
+     (let [invoke #(binding [*runtime-schemas* (:schemas kir)
+                             *value-call* value-call]
                      (invoke-function function
                                     (mapv (fn [arg type]
                                             (if (= type :i64)
@@ -2882,7 +2916,8 @@
                              kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
                              kernel-subregion
                              kernel-load-u32 kernel-store-u32
-                             kernel-boot-info kernel-read-cr3 kernel-write-cr3 kernel-invlpg
+                             kernel-compare-exchange-u32
+                             kernel-boot-info kernel-publish-current-domain kernel-value-runtime-capability-table kernel-value-provider-queue kernel-value-runtime-arena kernel-value-runtime-cas-scratch kernel-publish-value-provider-status kernel-value-provider-status kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-cli kernel-sti kernel-hlt kernel-pause
                              kernel-out-u8 kernel-out-u32
                              kernel-in-u8 kernel-in-u32
