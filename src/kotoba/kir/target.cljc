@@ -54,6 +54,19 @@
    :js-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :javascript :isa :javascript :os :unspecified :abi :kotoba-restricted-esm-v1 :runtime :kototama-js-host-v1}
    :js-browser-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :javascript :isa :javascript :os :browser :abi :kotoba-restricted-esm-v1 :runtime :kototama-worker-host-v1}
 
+   ;; A bounded Ethereum Virtual Machine contract target.  The first profile
+   ;; deliberately names the EVM itself rather than any host chain: the same
+   ;; bytecode must execute under an ordinary EVM, a FEVM-style interpreter,
+   ;; or an independent Kotoba network without changing its semantics.
+   :evm256-kotoba-v1 {:format :kotoba.target-profile/v1
+                      :execution :evm
+                      :isa :evm256
+                      :os :unspecified
+                      :abi :ethereum-contract-abi-v1
+                      :runtime :kotoba-evm-host-v1
+                      :evm-revision :shanghai
+                      :ambient-precompiles false}
+
    ;; ADR-2607252500 makes a Wasm Component the primary application artifact:
    ;; portable, linked through typed WIT imports, receiving no authority beyond
    ;; the capabilities its host admits. This profile is the compile target for
@@ -72,7 +85,7 @@
                               :runtime :kototama-component-host-v1
                               :wasi-version "0.3.0" :ambient-wasi false}})
 
-(def compatibility-targets #{:wasm32-kotoba-v1 :x86_64-kotoba-v1 :aarch64-kotoba-v1 :cljs-kotoba-v1 :js-kotoba-v1})
+(def compatibility-targets #{:wasm32-kotoba-v1 :x86_64-kotoba-v1 :aarch64-kotoba-v1 :cljs-kotoba-v1 :js-kotoba-v1 :evm256-kotoba-v1})
 (defn profile [target] (get profiles target))
 (defn backend [target]
   (case (:isa (profile target))
@@ -81,4 +94,5 @@
     :aarch64 :aarch64-kotoba-v1
     :cljs :cljs-kotoba-v1
     :javascript :js-kotoba-v1
+    :evm256 :evm256-kotoba-v1
     nil))
