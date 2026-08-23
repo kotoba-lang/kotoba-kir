@@ -85,7 +85,10 @@
                               :runtime :kototama-component-host-v1
                               :wasi-version "0.3.0" :ambient-wasi false}})
 
-(def compatibility-targets #{:wasm32-kotoba-v1 :x86_64-kotoba-v1 :aarch64-kotoba-v1 :cljs-kotoba-v1 :js-kotoba-v1 :evm256-kotoba-v1})
+;; Backends in this set participate in the whole-language parity matrix.
+;; Bounded targets remain real profiles and source-compilable targets, but do
+;; not enter this set until they implement that full surface.
+(def compatibility-targets #{:wasm32-kotoba-v1 :x86_64-kotoba-v1 :aarch64-kotoba-v1 :cljs-kotoba-v1 :js-kotoba-v1})
 (defn profile [target] (get profiles target))
 (defn backend [target]
   (case (:isa (profile target))
