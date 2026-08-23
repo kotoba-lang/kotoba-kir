@@ -36,6 +36,19 @@
          (select-keys (target/profile :wasm-component-kotoba-v2)
                       [:execution :abi :runtime :wasi-version :ambient-wasi]))))
 
+(deftest evm-target-is-chain-neutral-and-denies-ambient-precompiles
+  (is (= {:execution :evm
+          :isa :evm256
+          :abi :ethereum-contract-abi-v1
+          :runtime :kotoba-evm-host-v1
+          :evm-revision :shanghai
+          :ambient-precompiles false}
+         (select-keys (target/profile :evm256-kotoba-v1)
+                      [:execution :isa :abi :runtime :evm-revision
+                       :ambient-precompiles])))
+  (is (= :evm256-kotoba-v1 (target/backend :evm256-kotoba-v1)))
+  (is (contains? target/compatibility-targets :evm256-kotoba-v1)))
+
 (deftest lowering-rejects-malformed-hir-before-consuming-it
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unknown-module-keys"
                         (kotoba.kir/lower (assoc valid-hir :private true))))
