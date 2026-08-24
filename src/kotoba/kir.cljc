@@ -1373,6 +1373,74 @@
        (nil? (namespace sym))
        (boolean (re-matches #"__kotoba_loop_\d+" (name sym)))))
 
+(defn- loop-helper-self-calls-off-tail
+  "Calls to `fname` inside `body` that are NOT in tail position.
+
+   The trampoline's admission is `(and (loop-helper-name? op) (= op tip))`,
+   which says `self-call` and nothing about where the call sits. A self-call
+   in an argument position therefore evaluates to a trampoline MARKER, and
+   `invoke-function` only ever unwraps a marker that comes back as the whole
+   body result -- so the marker becomes an operand. Measured 2026-08-24 on a
+   hand-written module:
+
+     (defn __kotoba_loop_1 [n] (if (<= n 0) 0 (+ 1 (__kotoba_loop_1 (- n 1)))))
+     => Cannot convert {:kotoba.kir/trampoline true, :function __kotoba_loop_1,
+                        :values [2]} to a BigInt
+
+   Unreachable from `.kotoba` source: the frontend emits these names only for
+   `loop`/`recur` desugar and always in tail position, and
+   `reserved-binding-name?` keeps user code away from the `__kotoba_` prefix.
+   But `kotoba.hir/v3` is an accepted input surface, so without this check
+   `hir/validate!` admits a module the interpreter cannot run correctly, and
+   the failure surfaces as an internal representation inside an error message
+   rather than as a refusal in the language's own vocabulary.
+
+   Rejecting is right rather than making it work: a non-tail self-call in a
+   helper the frontend guarantees is tail-recursive did not come from the
+   frontend, and the interpreter has no obligation to interpret it."
+  [fname body]
+  (let [found (volatile! [])]
+    (letfn [(walk [form tail?]
+              (when (and (seq? form) (seq form))
+                (let [[op & args] form]
+                  (cond
+                    ;; `(let [n v n v] body)` -- one body form, and the
+                    ;; binding VALUES are not in tail position.
+                    (= op 'let)
+                    (let [[bindings body-form] args]
+                      (doseq [v (take-nth 2 (rest bindings))] (walk v false))
+                      (walk body-form tail?))
+
+                    (= op 'if)
+                    (let [[test then else] args]
+                      (walk test false)
+                      (walk then tail?)
+                      (walk else tail?))
+
+                    (= op 'do)
+                    (do (doseq [f (butlast args)] (walk f false))
+                        (walk (last args) tail?))
+
+                    :else
+                    (do (when (and (= op fname) (not tail?))
+                          (vswap! found conj form))
+                        (doseq [a args] (walk a false)))))))]
+      (walk body true))
+    @found))
+
+(defn- reject-loop-helper-self-calls-off-tail! [hir]
+  (doseq [function (:functions hir)
+          :when (loop-helper-name? (:name function))
+          :let [offenders (loop-helper-self-calls-off-tail (:name function)
+                                                           (:body function))]
+          :when (seq offenders)]
+    (throw (ex-info "loop-helper self-call outside tail position"
+                    {:phase :ir
+                     :rejected :loop-helper-self-call-not-in-tail-position
+                     :function (:name function)
+                     :calls (vec (take 4 offenders))
+                     :count (count offenders)}))))
+
 (defn- trampoline-call [fname values]
   {trampoline-tag true :function fname :values values})
 
@@ -3008,6 +3076,7 @@
 
 (defn lower [hir]
   (hir/validate! hir)
+  (reject-loop-helper-self-calls-off-tail! hir)
   (let [kernel-operations '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                              kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
                              kernel-subregion
