@@ -135,3 +135,24 @@
                (pr-str (:host-error-escaped outcome))))
       (is (= :fuel-exhausted (:trap outcome))
           (str "at depth " depth)))))
+
+(deftest a-real-trap-is-not-swallowed-by-the-host-stack-guard
+  (testing "the guard's negative branch -- which was unreachable on the JVM"
+    ;; `host-stack-exhausted?` decides whether to normalise or re-throw. Until
+    ;; 2026-08-24 the JVM catch was narrowed to `StackOverflowError`, so
+    ;; nothing else could arrive and the re-throw could never be taken there:
+    ;; half the guard was untestable on the runtime that had had it longest.
+    ;; Both runtimes now catch everything the oracle can throw, which makes
+    ;; this test possible at all.
+    (let [division-by-zero
+          (test-hir/module
+           {:format :kotoba.hir/v3 :entry 'main :exports ['main] :result :i64
+            :schemas {} :schema-identities {}
+            :functions [{:name 'main :params [] :param-types [] :result :i64
+                         :body (list 'quot 1 0)}]})
+          outcome (try (do (ir/lower division-by-zero) :lowered)
+                       (catch #?(:clj Throwable :cljs :default) e
+                         (or (trap-data e) {:host-error-escaped (str (ex-message e))})))]
+      (is (= :division-by-zero (:trap outcome))
+          (str "a Kotoba trap must pass through the host-stack guard unchanged, got "
+               (pr-str outcome))))))
