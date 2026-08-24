@@ -799,8 +799,16 @@
                      (tree-seq coll? seq body))))
          (:functions program))))
 
-(defn- host-stack-exhausted?
+(defn host-stack-exhausted?
   "Is `e` the host running out of native stack, rather than a Kotoba trap?
+
+   PUBLIC because the answer is not specific to this namespace. \"A host
+   resource error must never escape the language boundary\" is one invariant,
+   and by 2026-08-24 it had two hand-written implementations here and a third
+   place that needed one -- `kotoba.compiler.frontend/analyze`, which recurses
+   over the tree the desugar builds and let a raw `RangeError` out at a
+   64-arm `case`. kotoba-sema already depends on this library, so the
+   predicate is shared rather than copied a third time.
 
    Both branches ANSWER that question. An earlier version had `:clj true`,
    reasoning that only a `StackOverflowError` can reach the JVM catch -- true,
