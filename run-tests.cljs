@@ -11,6 +11,7 @@
 ;; the superproject measures this file against the directory.
 (ns run-tests
   (:require [cljs.test :as t]
+            [kotoba.kir-cljs-i64-ashr-test]
             [kotoba.kir-host-stack-trap-test]
             [kotoba.kir-loop-helper-tail-position-test]))
 
@@ -20,5 +21,6 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.kir-host-stack-trap-test
+(t/run-tests 'kotoba.kir-cljs-i64-ashr-test
+             'kotoba.kir-host-stack-trap-test
              'kotoba.kir-loop-helper-tail-position-test)

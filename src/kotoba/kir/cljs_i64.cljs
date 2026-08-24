@@ -24,6 +24,7 @@
 (def max-i64 (js/BigInt "9223372036854775807"))
 (def zero (js/BigInt 0))
 (def one (js/BigInt 1))
+(def ^:private two (js/BigInt 2))
 
 (defn bigint-value? [x]
   (boolean (and (some? x) (try (= (.-constructor x) js/BigInt) (catch :default _ false)))))
@@ -55,9 +56,22 @@
   2^SHIFT -- the one-line adjustment below (subtract 1 from the truncated
   quotient when the remainder is nonzero and N is negative) converts
   truncating division into floor division, which IS equivalent to
-  arithmetic right shift for a positive power-of-two divisor."
+  arithmetic right shift for a positive power-of-two divisor.
+
+  SHIFT may be anything in 0..63. The divisor is built by repeated bigint
+  multiplication rather than `(js/BigInt (bit-shift-left 1 shift))`, which is
+  what this fn used to do and which is wrong for every SHIFT of 32 or more:
+  cljs `bit-shift-left` coerces to int32, so `(bit-shift-left 1 56)` is 2^24
+  and `(bit-shift-left 1 32)` is 1. That is the exact hazard this namespace's
+  own docstring above is about, committed inside it.
+
+  Nothing caught it because the only caller was `sleb128`'s encoding loop in
+  `kotoba.wasm.core`, which shifts by 7 at a time and so never asked for 32 or
+  more. It surfaced on 2026-08-25 the first time a second caller appeared:
+  `kotoba.compiler.backend.evm`'s PUSH8 operand needs the bytes at shifts 56
+  down to 0, and got the low four twice."
   [n shift]
-  (let [d (js/BigInt (bit-shift-left 1 shift))
+  (let [d (loop [k shift acc one] (if (pos? k) (recur (dec k) (* acc two)) acc))
         q (/ n d)
         r (- n (* q d))]
     (if (and (not= r zero) (k-neg? n)) (- q one) q)))
