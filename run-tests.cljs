@@ -1,0 +1,22 @@
+;; nbb --classpath "src:test:$(clojure -Spath -M:test)" run-tests.cljs
+;;
+;; The portable side of this suite. Not most of it: kotoba.kir is `.cljc` and
+;; claims two runtimes, but every test here was `.clj` and the fleet gate is
+;; `:jvm-test`, so until 2026-08-24 the `:cljs` branches of kir.cljc had never
+;; been executed by anything. One of them was missing a guard the `:clj`
+;; branch had, and a raw host `RangeError` came out of `lower` because of it.
+;;
+;; Anything added to `test/` as `.cljc` belongs in BOTH lists below -- being
+;; required is not being run. `scripts/verify-cljs-runner-completeness.cljs` in
+;; the superproject measures this file against the directory.
+(ns run-tests
+  (:require [cljs.test :as t]
+            [kotoba.kir-host-stack-trap-test]))
+
+(defmethod t/report [:cljs.test/default :end-run-tests] [m]
+  (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
+                (:fail m) " failed, " (:error m) " errors"))
+  (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
+    (set! (.-exitCode js/process) 1)))
+
+(t/run-tests 'kotoba.kir-host-stack-trap-test)
