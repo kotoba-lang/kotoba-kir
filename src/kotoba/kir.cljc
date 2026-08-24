@@ -1626,8 +1626,25 @@
     (not value)
     #?(:clj (zero? value) :cljs (i64/k-zero? value))))
 
-(defn eval-expr [form env functions fuel heap call-stack cap-call]
-  (cond
+(defn eval-expr
+  "Evaluate one KIR form.
+
+   `if` and `let` do NOT recur into the host stack. Both end in a tail
+   position -- the chosen branch, the `let` body -- so they rebind and loop
+   here instead of calling this function again.
+
+   That is not a micro-optimisation. Everything this compiler builds out of
+   chained conditionals is a nested `if`: `cond` and `case` desugar to one,
+   `do` desugars to nested `let`, and the closure `invoke` dispatcher is a
+   linear chain over every candidate lambda in the module. With recursion, the
+   depth those reach was bounded by the HOST stack, which is why the constant
+   oracle's ceiling moved with the SIZE OF THE MODULE rather than with the
+   program being folded. Measured 2026-08-24 on nbb 1.5.212: a `lazy-map` over
+   an infinite sequence folded, and adding ONE unrelated function that also
+   used `lazy-map` made the identical `main` exhaust the host stack."
+  [form env functions fuel heap call-stack cap-call]
+  (loop [form form env env]
+   (cond
     #?(:clj (integer? form)
        ;; A literal here may be a bigint (read from `.kotoba` source) or a
        ;; plain number (synthesized by `kotoba.compiler.frontend`'s
@@ -1650,18 +1667,19 @@
     :else
     (let [[op & args] form]
       (cond
+        ;; `let` body and `if` branch are tail positions -- rebind and loop,
+        ;; never call back into this function. See the docstring.
         (= op 'let)
         (let [[bindings body] args
               env' (reduce (fn [e [name value]]
                              (assoc e name (eval-expr value e functions fuel heap call-stack cap-call)))
                            env (partition 2 bindings))]
-          (eval-expr body env' functions fuel heap call-stack cap-call))
+          (recur body env'))
 
         (= op 'if)
         (let [[test then else] args
               test-value (eval-expr test env functions fuel heap call-stack cap-call)]
-          (eval-expr (if (kotoba-false? test-value) else then)
-                     env functions fuel heap call-stack cap-call))
+          (recur (if (kotoba-false? test-value) else then) env))
 
         (= op 'do)
         (last (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args))
@@ -2964,7 +2982,7 @@
               tip (peek call-stack)]
           (if (and (loop-helper-name? op) (= op tip))
             (trampoline-call op values)
-            (invoke-function (get functions op) values functions fuel heap call-stack cap-call)))))))
+            (invoke-function (get functions op) values functions fuel heap call-stack cap-call))))))))
 
 (defn execute
   "Executes one KIR export using normative typed-value semantics. i64 math
