@@ -799,6 +799,25 @@
                      (tree-seq coll? seq body))))
          (:functions program))))
 
+(defn- host-stack-exhausted?
+  "Is `e` the host running out of native stack, rather than a Kotoba trap?
+
+   On the JVM the type alone answers it -- only a `StackOverflowError` reaches
+   the catch. On ClojureScript the catch is `:default`, so it has to tell this
+   one host resource error apart from every `ex-info` the interpreter throws
+   on purpose, and let those through untouched.
+
+   V8 and JavaScriptCore raise `RangeError: Maximum call stack size exceeded`;
+   SpiderMonkey raises `InternalError: too much recursion`. Matching on the
+   message as well as the type is deliberate: a `RangeError` that is NOT stack
+   exhaustion is a real error and must keep propagating."
+  [e]
+  #?(:clj true
+     :cljs (let [message (str (.-message e))]
+             (or (and (instance? js/RangeError e)
+                      (str/includes? message "call stack"))
+                 (str/includes? message "too much recursion")))))
+
 (defn- trap! [reason data]
   (throw (ex-info (name reason) (merge {:phase :ir :trap reason} data))))
 
@@ -2960,17 +2979,32 @@
                       (if (and (= :bool (:result function)) (not (boolean? value)))
                         (not #?(:clj (zero? value) :cljs (i64/k-zero? value)))
                         value))]
-       #?(:clj
-          ;; A host JVM with a small native stack can exhaust that stack just
-          ;; before the fixed Kotoba call budget does.  Host resource errors
-          ;; must never escape the language boundary: normalize this one
-          ;; precise failure to the same deterministic, fail-closed trap.
-          (try
-            (box-bool (invoke))
-            (catch StackOverflowError _
-              (trap! :fuel-exhausted {:limit fuel :host-stack-exhausted true})))
-          :cljs
-          (box-bool (invoke)))))))
+       ;; A host with a small native stack can exhaust that stack just before
+       ;; the fixed Kotoba call budget does. Host resource errors must never
+       ;; escape the language boundary: normalize this one precise failure to
+       ;; the same deterministic, fail-closed trap.
+       ;;
+       ;; BOTH runtimes, and that is the fix rather than the feature. Until
+       ;; 2026-08-24 only `:clj` had the guard, so on ClojureScript a raw
+       ;; `RangeError: Maximum call stack size exceeded` came out of `lower`
+       ;; for a program the JVM rejected with `:fuel-exhausted`. `lower`'s own
+       ;; comment about the oracle says unbounded non-helper recursion "still
+       ;; traps (fuel or host-stack) and aborts lower -- intentional"; on one
+       ;; of the two runtimes it did not.
+       ;;
+       ;; It stayed hidden because which limit is reached first depends on the
+       ;; interpreter, and this repository had no way to notice: every test was
+       ;; `.clj` and the fleet gate is `:jvm-test`, so the `:cljs` branch had
+       ;; never been executed at all. Measured 2026-08-24, folding a non-tail
+       ;; recursion: the JVM manages depth 1,000,000 through the trampoline-free
+       ;; path before trapping, nbb 1.4.210 folds 12 and traps at 16, nbb
+       ;; 1.5.212 folds 4 and traps at 8.
+       (try
+         (box-bool (invoke))
+         (catch #?(:clj StackOverflowError :cljs :default) e
+           (if (host-stack-exhausted? e)
+             (trap! :fuel-exhausted {:limit fuel :host-stack-exhausted true})
+             (throw e))))))))
 
 (defn lower [hir]
   (hir/validate! hir)
