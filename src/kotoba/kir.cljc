@@ -802,17 +802,23 @@
 (defn- host-stack-exhausted?
   "Is `e` the host running out of native stack, rather than a Kotoba trap?
 
-   On the JVM the type alone answers it -- only a `StackOverflowError` reaches
-   the catch. On ClojureScript the catch is `:default`, so it has to tell this
-   one host resource error apart from every `ex-info` the interpreter throws
-   on purpose, and let those through untouched.
+   Both branches ANSWER that question. An earlier version had `:clj true`,
+   reasoning that only a `StackOverflowError` can reach the JVM catch -- true,
+   and still the wrong shape: the predicate stopped asking on one runtime, and
+   the `(throw e)` at the call site became unreachable there. A guard whose
+   negative branch cannot be taken cannot be shown to discriminate, which is
+   the defect this whole guard exists to prevent, one level up.
+
+   On ClojureScript the catch is `:default`, so it has to tell this one host
+   resource error apart from every `ex-info` the interpreter throws on purpose,
+   and let those through untouched.
 
    V8 and JavaScriptCore raise `RangeError: Maximum call stack size exceeded`;
    SpiderMonkey raises `InternalError: too much recursion`. Matching on the
    message as well as the type is deliberate: a `RangeError` that is NOT stack
    exhaustion is a real error and must keep propagating."
   [e]
-  #?(:clj true
+  #?(:clj (instance? StackOverflowError e)
      :cljs (let [message (str (.-message e))]
              (or (and (instance? js/RangeError e)
                       (str/includes? message "call stack"))
@@ -3063,13 +3069,22 @@
        ;; It stayed hidden because which limit is reached first depends on the
        ;; interpreter, and this repository had no way to notice: every test was
        ;; `.clj` and the fleet gate is `:jvm-test`, so the `:cljs` branch had
-       ;; never been executed at all. Measured 2026-08-24, folding a non-tail
-       ;; recursion: the JVM manages depth 1,000,000 through the trampoline-free
-       ;; path before trapping, nbb 1.4.210 folds 12 and traps at 16, nbb
-       ;; 1.5.212 folds 4 and traps at 8.
+       ;; never been executed at all.
+       ;;
+       ;; How deep the oracle gets before one limit or the other is reached is
+       ;; a property of the host AND of the caller's own stack, and it is not
+       ;; written down here on purpose: a number in a comment is quoted without
+       ;; its date. `kir_host_stack_trap_test` measures it where it stands.
        (try
          (box-bool (invoke))
-         (catch #?(:clj StackOverflowError :cljs :default) e
+         ;; `Throwable` on the JVM too, not `StackOverflowError`. Narrowing the
+         ;; catch to the one type made the predicate's negative branch
+         ;; unreachable there -- nothing else could arrive -- so half of this
+         ;; guard could never be shown to work on the runtime that has had it
+         ;; the longest. Now both runtimes catch everything the oracle can
+         ;; throw and both re-throw what is not host stack exhaustion, which
+         ;; `kir_host_stack_trap_test` pins from both directions.
+         (catch #?(:clj Throwable :cljs :default) e
            (if (host-stack-exhausted? e)
              (trap! :fuel-exhausted {:limit fuel :host-stack-exhausted true})
              (throw e))))))))
