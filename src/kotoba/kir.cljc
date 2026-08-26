@@ -242,13 +242,37 @@
     [:error [:record :kotoba.dataspace/error
              [[:code :keyword] [:message :string]]]]]])
 
+(def ^:private native-ui-parent-type [:option :keyword])
+(def ^:private native-ui-node-type
+  [:record :kotoba.ui/node
+   [[:id :keyword] [:parent native-ui-parent-type]
+    [:kind :keyword] [:text :string]]])
+(def ^:private native-ui-node-set-type [:set native-ui-node-type])
+(def ^:private native-ui-commit-request-type
+  [:record :kotoba.ui/commit-request
+   [[:base-revision :i64] [:nodes native-ui-node-set-type]]])
+(def ^:private native-ui-commit-result-type
+  [:record :kotoba.ui/commit-result [[:revision :i64] [:node-count :i64]]])
+(def ^:private native-ui-event-request-type
+  [:record :kotoba.ui/event-request [[:after-revision :i64]]])
+(def ^:private native-ui-event-type
+  [:record :kotoba.ui/event
+   [[:revision :i64] [:target :keyword] [:kind :keyword] [:value :string]]])
+(def ^:private native-ui-event-result-type [:option native-ui-event-type])
+
 (defn- native-provider-contract? [cap-id request-type result-type]
   (or (and (= 7 cap-id)
            (= native-clock-request-type request-type)
            (= native-clock-result-type result-type))
       (and (= 24 cap-id)
            (= native-dataspace-request-type request-type)
-           (= native-dataspace-result-type result-type))))
+           (= native-dataspace-result-type result-type))
+      (and (= 9 cap-id)
+           (= native-ui-commit-request-type request-type)
+           (= native-ui-commit-result-type result-type))
+      (and (= 10 cap-id)
+           (= native-ui-event-request-type request-type)
+           (= native-ui-event-result-type result-type))))
 
 (defn- native-word-value-type?
   "Types whose runtime value fits the native backend's uniform 64-bit word.
@@ -265,7 +289,11 @@
             (and (vector? type)
                  (case (first type)
                    :option (and (= 2 (count type))
-                                (native-word-value-type? (second type) (inc depth)))
+                                (or (native-word-value-type? (second type) (inc depth))
+                                    (native-scalar-record-type? (second type))))
+                   :set (and (= 2 (count type))
+                             (or (native-word-value-type? (second type) (inc depth))
+                                 (native-scalar-record-type? (second type))))
                    :result (and (= 3 (count type))
                                 (native-word-value-type? (second type) (inc depth))
                                 (native-word-value-type? (nth type 2) (inc depth)))
@@ -597,6 +625,25 @@
                                 vector-f64-conj}
                              op)
                   (every? walk args)
+                  ;; typed-set is a host-table handle, the same width as
+                  ;; vector-i64. The type descriptor is sealed data, like
+                  ;; record-new's first argument, and is not walked.
+                  (= op 'typed-set-new)
+                  (let [[type & items] args]
+                    (and (vector? type) (= :set (first type))
+                         (native-word-value-type? type)
+                         (every? walk items)))
+                  (= op 'typed-set-conj)
+                  (let [[type value item] args]
+                    (and (= 3 (count args))
+                         (vector? type) (= :set (first type))
+                         (native-word-value-type? type)
+                         (walk value) (walk item)))
+                  (contains? '#{typed-set-count typed-set-nth} op)
+                  (let [[type & rest] args]
+                    (and (vector? type) (= :set (first type))
+                         (native-word-value-type? type)
+                         (every? walk rest)))
 
                   ;; `string-contains?` / `string-replace-all` are admitted for
                   ;; exactly the reason `i32-operations` and the `vector-*`
