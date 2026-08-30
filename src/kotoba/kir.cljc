@@ -2934,6 +2934,7 @@
         (contains? '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
                       kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-read-cs kernel-page-fault-handler-address
+                      kernel-rt-timer-handler-address
                       kernel-page-fault-recovery-handler-address
                       kernel-configure-page-fault-recovery kernel-load-idt
                       kernel-double-fault-handler-address
@@ -3180,6 +3181,7 @@
                              kernel-boot-info kernel-read-cr0 kernel-write-cr0
                              kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                              kernel-read-cs kernel-page-fault-handler-address
+                             kernel-rt-timer-handler-address
                              kernel-page-fault-recovery-handler-address
                              kernel-configure-page-fault-recovery kernel-load-idt
                              kernel-double-fault-handler-address
