@@ -1294,6 +1294,195 @@
        :cljs (i64/wrap-i64 (i64/ashr (js/BigInt.asUintN 64 (i64/->bigint value))
                                      shift)))))
 
+;; ---------------------------------------------------------------------------
+;; Kernel memory image.
+;;
+;; The kernel branch in `eval-expr` used to refuse every memory operation for
+;; the same reason it still refuses `kernel-in-u8` and `kernel-read-msr`: this
+;; interpreter cannot invent what the machine holds. That argument is right
+;; about a device bus, a model-specific register and a race for a lock. It is
+;; NOT right about `kernel-load-u8` on a CALLER-OWNED buffer. Those bytes are
+;; not a property of the machine; they are an argument, and a caller that
+;; supplies them has told the oracle what they are.
+;;
+;; Refusing them anyway cost every byte-walking decision object its off-target
+;; oracle. aiueos records the consequence in its own words:
+;; `contracts/dhcp-reply-valid-v1.edn` writes `:verification {:off-target
+;; :impossible}`, and `scripts/aiueos/verify_value_runtime_cas_verify.clj`
+;; records the worse one -- with no way to run the object it re-implemented
+;; SHA-256 in Java and compared THAT against the contract's own expected
+;; values, so its six vectors passed whatever the compiled object did.
+;;
+;; So an image is optional and absent by default. Without one the refusal is
+;; byte for byte what it was. With one, the checks each backend emits are
+;; reproduced exactly -- profile maximum, non-null base, index inside the
+;; declared window -- and a violation traps as `:kernel-memory-fault`, which is
+;; that backend's UD2 and therefore a real answer.
+;;
+;; An access that is LEGAL for the machine but reaches outside the supplied
+;; image is neither an admission nor a refusal. It gets its own trap,
+;; `:kernel-memory-outside-image`: the oracle could not answer, and that must
+;; never be readable as either verdict.
+
+(def ^:private kernel-memory-profile
+  "op -> [profile-maximum access-width-bytes], transcribed from
+  `kotoba.native.x86_64` and checked against `kotoba.native.aarch64`, which
+  admit identical bounds on both ISAs. An op absent from this map is not a
+  memory op."
+  '{kernel-load-u8     [512 1]
+    kernel-load-u8-4k  [4096 1]
+    kernel-load-u8-16k [16384 1]
+    kernel-store-u8    [512 1]
+    kernel-store-u8-4k [4096 1]
+    kernel-load-u32    [512 4]
+    kernel-store-u32   [512 4]})
+
+(defn- word-above?
+  "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
+  [a b]
+  #?(:clj (pos? (Long/compareUnsigned (long a) (long b)))
+     :cljs (> (js/BigInt.asUintN 64 (i64/->bigint a))
+              (js/BigInt.asUintN 64 (i64/->bigint b)))))
+
+(defn- word-at-least?
+  "Unsigned `>=` -- the backends' `jae`."
+  [a b]
+  #?(:clj (not (neg? (Long/compareUnsigned (long a) (long b))))
+     :cljs (>= (js/BigInt.asUintN 64 (i64/->bigint a))
+               (js/BigInt.asUintN 64 (i64/->bigint b)))))
+
+(defn- word-zero? [x]
+  #?(:clj (zero? (long x)) :cljs (i64/k-zero? (i64/->bigint x))))
+
+(defn- word-plus [a b]
+  #?(:clj (unchecked-add (long a) (long b))
+     :cljs (i64/wrap-i64 (+ (i64/->bigint a) (i64/->bigint b)))))
+
+(defn- word-minus [a b]
+  #?(:clj (unchecked-subtract (long a) (long b))
+     :cljs (i64/wrap-i64 (- (i64/->bigint a) (i64/->bigint b)))))
+
+(defn- word-byte
+  "The byte `shift` bits up in `value`, as a plain number -- what the backends
+  narrow to before `mov [mem],al`."
+  [value shift]
+  #?(:clj (int (bit-and (unsigned-bit-shift-right (long value) shift) 255))
+     :cljs (js/Number (js/BigInt.asUintN
+                       8 (/ (js/BigInt.asUintN 64 (i64/->bigint value))
+                            (js/BigInt (bit-shift-left 1 shift)))))))
+
+(defn- ->word [n]
+  #?(:clj (long n) :cljs (i64/->bigint n)))
+
+(defn- kernel-window-check!
+  "The three checks `emit-kernel-load-u8` and its siblings emit, in their
+  order, so a program that traps here traps on the machine and vice versa."
+  [op base length index]
+  (let [[maximum width] (get kernel-memory-profile op)]
+    (when (word-above? length maximum)
+      (trap! :kernel-memory-fault {:operation op :check :length-above-profile-maximum
+                                   :length length :maximum maximum}))
+    (when (word-zero? base)
+      (trap! :kernel-memory-fault {:operation op :check :null-base}))
+    (if (= width 1)
+      (when (word-at-least? index length)
+        (trap! :kernel-memory-fault {:operation op :check :index-outside-window
+                                     :index index :length length}))
+      ;; `lea rsi,[rax+4]; cmp rsi,rcx; ja`. The add WRAPS, exactly as it does
+      ;; on both backends, so an index in [2^64-4, 2^64-1] survives this check
+      ;; and addresses the four bytes BEFORE the buffer. Reproduced and not
+      ;; corrected: an oracle that refused what the machine admits would be
+      ;; wrong in the direction that hides the hole. kotoba-native's own
+      ;; comment claims such an index "wraps into the trap rather than out of
+      ;; it", which is true for every index except these four.
+      (when (word-above? (word-plus index 4) length)
+        (trap! :kernel-memory-fault {:operation op :check :four-byte-access-outside-window
+                                     :index index :length length})))))
+
+(defn- image-slot
+  "Index of `pointer + index` within the supplied image, or a refusal to
+  answer. Never a machine verdict: see the header above."
+  [memory op pointer index width]
+  (let [image @(:bytes memory)
+        limit (count image)
+        slot (word-minus (word-plus pointer index) (:base memory))
+        inside? #?(:clj (and (<= 0 slot) (<= (+ slot width) limit))
+                   :cljs (and (>= slot (js/BigInt 0))
+                              (<= (+ slot (js/BigInt width)) (js/BigInt limit))))]
+    (when-not inside?
+      (trap! :kernel-memory-outside-image
+             {:operation op :pointer pointer :index index :width width
+              :image-base (:base memory) :image-bytes limit}))
+    #?(:clj slot :cljs (js/Number slot))))
+
+(defn- kernel-memory-call!
+  "Evaluate one kernel memory operation against a supplied image."
+  [op memory values]
+  (if (= op 'kernel-subregion)
+    ;; `(kernel-subregion base length offset sublen)` -> base+offset, trapping
+    ;; unless the sub-window fits. No memory is touched, so no image is read:
+    ;; a derived pointer is arithmetic, and the load that uses it is what has
+    ;; to be inside the image.
+    (let [[base length offset sublen] values]
+      (when (word-zero? base)
+        (trap! :kernel-memory-fault {:operation op :check :null-base}))
+      (when (word-above? offset length)
+        (trap! :kernel-memory-fault {:operation op :check :offset-outside-window
+                                     :offset offset :length length}))
+      (let [remaining (word-minus length offset)]
+        (when (word-above? sublen remaining)
+          (trap! :kernel-memory-fault {:operation op :check :subwindow-outside-window
+                                       :sublength sublen :remaining remaining})))
+      (word-plus base offset))
+    (let [[base length index value] values
+          [_ width] (get kernel-memory-profile op)
+          _ (kernel-window-check! op base length index)
+          slot (image-slot memory op base index width)
+          bytes (:bytes memory)]
+      (case op
+        (kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k)
+        (->word (nth @bytes slot))
+
+        kernel-load-u32
+        (let [image @bytes]
+          (->word (+ (nth image slot)
+                     (* 256 (nth image (+ slot 1)))
+                     (* 65536 (nth image (+ slot 2)))
+                     (* 16777216 (nth image (+ slot 3))))))
+
+        (kernel-store-u8 kernel-store-u8-4k)
+        (do (vswap! bytes assoc slot (word-byte value 0))
+            ;; RAX still holds `value` after `mov [rdx+rdi],al`.
+            value)
+
+        kernel-store-u32
+        (do (vswap! bytes assoc
+                    slot (word-byte value 0)
+                    (+ slot 1) (word-byte value 8)
+                    (+ slot 2) (word-byte value 16)
+                    (+ slot 3) (word-byte value 24))
+            value)))))
+
+(defn- validated-memory
+  "Admit an optional `:memory` image for `execute`."
+  [memory]
+  (when memory
+    (let [{:keys [base bytes]} memory]
+      (when-not (and (some? base) (not (word-zero? base)))
+        (throw (ex-info "memory image base must be a non-zero address"
+                        {:phase :ir :base base})))
+      ;; A plain vector would make every store invisible to the caller, and an
+      ;; oracle whose writes cannot be read back is the failure this whole
+      ;; change exists to remove. Refuse it rather than copy it.
+      (when-not (volatile? bytes)
+        (throw (ex-info "memory image bytes must be a volatile! holding a vector"
+                        {:phase :ir})))
+      (when-not (and (vector? @bytes)
+                     (every? #(and (integer? %) (<= 0 % 255)) @bytes))
+        (throw (ex-info "memory image bytes must be a vector of 0..255"
+                        {:phase :ir :count (count @bytes)})))
+      {:base (->word base) :bytes bytes})))
+
 (defn- i32-add [x y]
   #?(:clj (long (unchecked-add-int (unchecked-int (long x)) (unchecked-int (long y))))
      :cljs (js/BigInt.asIntN 32 (+ (i32-wrap x) (i32-wrap y)))))
@@ -2900,18 +3089,30 @@
               option-type [:option type]]
           (if (= tag (name type)) [option-type true payload] [option-type false]))
 
-        ;; `kernel-try-lock-u32`/`kernel-unlock-u32` belong here for the same
-        ;; reason the loads and stores do, and one more. Their VALUE is
-        ;; whether this caller won a race, which is a property of the machine
-        ;; at run time and of nothing this interpreter can see. Answering
-        ;; would not merely invent a value: every call site branches on it, so
-        ;; an invented answer becomes "the lock was free" decided by a
-        ;; compiler that has never seen the memory. It refuses.
+        ;; `kernel-try-lock-u32`/`kernel-unlock-u32` refuse whether or not an
+        ;; image was supplied, and the reason is the one that separates them
+        ;; from the loads below. Their VALUE is whether this caller won a race,
+        ;; which is a property of the machine at run time. Answering would not
+        ;; merely invent a value: every call site branches on it, so an
+        ;; invented answer becomes "the lock was free" decided by a compiler
+        ;; that has never seen the memory. An image says what the bytes ARE; a
+        ;; lock asks who got there first, and no image can say.
+        (contains? '#{kernel-try-lock-u32 kernel-unlock-u32} op)
+        (trap! :kernel-memory-unavailable {:operation op})
+
+        ;; The loads, the stores and `kernel-subregion` refused for a DIFFERENT
+        ;; reason -- nobody had supplied the bytes -- and that reason is now
+        ;; answerable. See `kernel-memory-profile` above for why the two cases
+        ;; were ever one, and what it cost. With no `:memory` this is the same
+        ;; refusal, unchanged.
         (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                       kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32
-                      kernel-try-lock-u32 kernel-unlock-u32} op)
-        (trap! :kernel-memory-unavailable {:operation op})
+                      kernel-load-u32 kernel-store-u32} op)
+        (if-let [memory (:memory heap)]
+          (kernel-memory-call!
+           op memory
+           (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args))
+          (trap! :kernel-memory-unavailable {:operation op}))
 
         ;; `kernel-in-u8`/`kernel-in-u32` (x86 port reads) belong here for the
         ;; same reason their write counterparts do, and one more: their VALUE
@@ -3035,9 +3236,17 @@
 (defn execute
   "Executes one KIR export using normative typed-value semantics. i64 math
   wraps modulo 2^64; bounded strings preserve Unicode text; invalid values,
-  division, and resource exhaustion trap."
+  division, and resource exhaustion trap.
+
+  `:memory {:base <address> :bytes (volatile! [0..255 ...])}` supplies the
+  buffer a byte-walking kernel object reads and writes. It is optional and
+  absent by default: with no image every kernel memory operation refuses with
+  `:kernel-memory-unavailable`, exactly as before. The `volatile!` is required
+  rather than convenient -- the caller reads its stores back out of it, and an
+  oracle whose writes are invisible is worth nothing."
   ([kir function-name args] (execute kir function-name args {}))
-  ([kir function-name args {:keys [fuel cap-call typed-cap-call pair-capacity kgraph-capacity]
+  ([kir function-name args {:keys [fuel cap-call typed-cap-call pair-capacity kgraph-capacity
+                                   memory]
                             :or {fuel default-fuel pair-capacity default-pair-capacity
                                  kgraph-capacity default-kgraph-capacity}}]
    (when (and (contains? kir :exports)
@@ -3058,7 +3267,8 @@
      (validated-closure-param-indexes function)
      (validated-i64-pair-chain-param-indexes function)
      (validated-closure-result? function))
-   (let [cap-dispatch (when (or cap-call typed-cap-call)
+   (let [memory-image (validated-memory memory)
+         cap-dispatch (when (or cap-call typed-cap-call)
                         (fn
                           ([cap-id value]
                            (if cap-call
@@ -3108,7 +3318,8 @@
                                           args param-types)
                                     functions
                                     (volatile! fuel) {:cells (volatile! []) :capacity pair-capacity
-                                                      :datoms (volatile! []) :kgraph-capacity kgraph-capacity}
+                                                      :datoms (volatile! []) :kgraph-capacity kgraph-capacity
+                                                      :memory memory-image}
                                     [] cap-dispatch))
            ;; Box a `:bool` result at the boundary, the way every other target
            ;; does. `:bool` is a plain 0/1 word inside the interpreter (and
