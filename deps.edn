@@ -9,6 +9,12 @@
         ;; DefCID is CIDv1 over a real deterministic DAG-CBOR block. These
         ;; are the same pins used by the former language-repository authority;
         ;; extraction must preserve every existing golden byte and CID.
+        ;; The portable SHA-256 behind `document-sha256` on ClojureScript.
+        ;; Named directly rather than reached through io-multiformats, whose
+        ;; own `:cljs` sha256 requires the npm package `@noble/hashes`.
+        io.github.kotoba-lang/org-nist-sha2
+        {:git/url "https://github.com/kotoba-lang/org-nist-sha2.git"
+         :git/sha "cb67e53e590e0999d741523797729a3d747cda95"}
         io.github.kotoba-lang/io-multiformats
         {:git/url "https://github.com/kotoba-lang/io-multiformats.git"
          :git/sha "eec3ee85c458ea830be94518b9a42f4a8f1aee40"}

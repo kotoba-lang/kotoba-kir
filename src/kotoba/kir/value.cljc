@@ -1,6 +1,6 @@
 (ns kotoba.kir.value
   (:require [clojure.string :as str]
-            #?@(:cljs [[multiformats.core :as mf]
+            #?@(:cljs [[sha2.core :as sha2]
                        [kotoba.kir.cljs-i64 :as i64]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
                    [java.security MessageDigest])))
@@ -1204,12 +1204,20 @@
        ;; ClojureScript has no MessageDigest, and this threw rather than
        ;; digesting -- so `document-sha256`, the W4 exit-gate identity for a
        ;; logical document, was a JVM-only operation while every other document
-       ;; operation was portable. `multiformats.core/sha256` is already on this
-       ;; repository's dependency path and computes the same digest in portable
-       ;; Clojure on both hosts (kotoba-lang/org-nist-sha2), so the two branches
-       ;; differ only in which implementation they reach, not in what they
-       ;; return; `document-sha256-agrees-across-hosts` pins that.
-       :cljs (mf/hexify (mf/sha256 bytes)))))
+       ;; operation was portable. `sha2.core` computes the same digest in
+       ;; portable Clojure, so the two branches differ only in which
+       ;; implementation they reach, not in what they return;
+       ;; `document-sha256-agrees-across-hosts` pins that against `shasum`.
+       ;;
+       ;; NOT `multiformats.core/sha256`, which was the first version of this
+       ;; and reads the same at a glance: on `:cljs` that namespace requires
+       ;; `@noble/hashes/sha2.js`, so routing through it put an npm package in
+       ;; the require graph of a T0 namespace. It went unnoticed because the
+       ;; io-multiformats checkout on hand predated that require -- being
+       ;; a direct dependency says nothing about what the resolved version of
+       ;; it pulls in. org-nist-sha2 is the implementation multiformats itself
+       ;; used, one link closer, with no host packages at all.
+       :cljs (sha2/sha256-hex (mapv #(bit-and % 0xff) bytes)))))
 
 (defn- bytes->hex
   "Lowercase hex of a byte array."
