@@ -1388,16 +1388,27 @@
       (when (word-at-least? index length)
         (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                      :index index :length length}))
-      ;; `lea rsi,[rax+4]; cmp rsi,rcx; ja`. The add WRAPS, exactly as it does
-      ;; on both backends, so an index in [2^64-4, 2^64-1] survives this check
-      ;; and addresses the four bytes BEFORE the buffer. Reproduced and not
-      ;; corrected: an oracle that refused what the machine admits would be
-      ;; wrong in the direction that hides the hole. kotoba-native's own
-      ;; comment claims such an index "wraps into the trap rather than out of
-      ;; it", which is true for every index except these four.
-      (when (word-above? (word-plus index 4) length)
-        (trap! :kernel-memory-fault {:operation op :check :four-byte-access-outside-window
-                                     :index index :length length})))))
+      ;; Two checks, in the order `kotoba.native.machine-ir` lowers them:
+      ;; `index < length`, and then `length - index >= 4`. Neither can wrap.
+      ;;
+      ;; The first version of this read only kotoba-native's `emit-kernel-load-u32`,
+      ;; which computes `index + 4` with `lea` and compares THAT -- a form where
+      ;; an index in [2^64-4, 2^64-1] wraps to 0..3 and addresses the four bytes
+      ;; before the window -- and reproduced it deliberately, on the reasoning
+      ;; that an oracle must not refuse what the machine admits. The reasoning
+      ;; was right and the reading was wrong: those two functions are a fallback
+      ;; that `emit-program` does not route u32 through (measured 2026-08-31 by
+      ;; instrumenting both vars, including a recursive walker that leaves the
+      ;; pilot path), and the shipping lowering has always used the
+      ;; non-wrapping form. kotoba-native now guards the fallback too, so both
+      ;; paths agree with what is modelled here.
+      (do
+        (when (word-at-least? index length)
+          (trap! :kernel-memory-fault {:operation op :check :index-outside-window
+                                       :index index :length length}))
+        (when (word-above? 4 (word-minus length index))
+          (trap! :kernel-memory-fault {:operation op :check :four-byte-access-outside-window
+                                       :index index :length length}))))))
 
 (defn- image-slot
   "Index of `pointer + index` within the supplied image, or a refusal to

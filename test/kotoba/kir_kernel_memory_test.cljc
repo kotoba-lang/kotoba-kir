@@ -111,16 +111,29 @@
       (is (= :kernel-memory-fault (:trap data)))
       (is (= :four-byte-access-outside-window (:check data))))))
 
-(deftest four-byte-index-wraps-below-the-buffer
-  ;; NOT a model choice. `emit-kernel-load-u32` computes `index + 4` with
-  ;; `lea rsi,[rax+4]` and compares THAT against length, so an index in
-  ;; [2^64-4, 2^64-1] wraps to 0..3, passes, and addresses the four bytes
-  ;; BEFORE the declared window. kotoba-native's own comment says such an
-  ;; index "wraps into the trap rather than out of it", which holds for every
-  ;; index except these four. The oracle reproduces the machine; correcting it
-  ;; here would hide the hole rather than close it.
-  (let [mem (image 4096 [9 9 9 1 2 3 4 9 9 9 9 9 9 9 9 9])]
-    (is (= 0x04030201 (w (run load-u32 [4100 8 -1] {:memory mem}))))))
+(deftest a-four-byte-index-near-two-to-the-sixty-four-faults
+  ;; This test asserted the opposite for one commit, and the story is worth
+  ;; keeping. `kotoba.native.x86-64/emit-kernel-load-u32` computes `index + 4`
+  ;; with `lea` and compares THAT against length, so an index in
+  ;; [2^64-4, 2^64-1] wraps to 0..3 and addresses the four bytes BEFORE the
+  ;; window. Reproducing it here was justified on the grounds that an oracle
+  ;; must never refuse what the machine admits.
+  ;;
+  ;; The grounds were right; the reading was not. `emit-program` routes u32
+  ;; through `kotoba.native.machine-ir`, which proves `index < length` and then
+  ;; `length - index >= 4` -- a form that cannot wrap, pinned since before this
+  ;; file existed by `u32-accesses-reserve-four-bytes-not-one`. Those two
+  ;; emitters are a fallback nothing reached (measured 2026-08-31 by
+  ;; instrumenting both vars, recursive walker included), and they now carry
+  ;; the same guard.
+  ;;
+  ;; So the oracle was wrong in the OTHER direction for one commit: it admitted
+  ;; four indexes the machine refuses, which is how a Kotoba object passes an
+  ;; oracle and traps on hardware.
+  (let [mem (image 4096 [9 9 9 1 2 3 4 9 9 9 9 9 9 9 9 9])
+        data (trapped #(run load-u32 [4100 8 -1] {:memory mem}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :index-outside-window (:check data)))))
 
 ;; --- subregion --------------------------------------------------------------
 
