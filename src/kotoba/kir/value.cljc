@@ -1,6 +1,7 @@
 (ns kotoba.kir.value
   (:require [clojure.string :as str]
-            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]]))
+            #?@(:cljs [[multiformats.core :as mf]
+                       [kotoba.kir.cljs-i64 :as i64]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
                    [java.security MessageDigest])))
 
@@ -1200,7 +1201,15 @@
   (let [bytes (document-canonical-bytes value)]
     #?(:clj (let [digest (.digest (MessageDigest/getInstance "SHA-256") ^bytes bytes)]
               (apply str (map #(format "%02x" (bit-and (int %) 0xff)) digest)))
-       :cljs (throw (js/Error. "document-sha256-hex requires the JVM/Node host path")))))
+       ;; ClojureScript has no MessageDigest, and this threw rather than
+       ;; digesting -- so `document-sha256`, the W4 exit-gate identity for a
+       ;; logical document, was a JVM-only operation while every other document
+       ;; operation was portable. `multiformats.core/sha256` is already on this
+       ;; repository's dependency path and computes the same digest in portable
+       ;; Clojure on both hosts (kotoba-lang/org-nist-sha2), so the two branches
+       ;; differ only in which implementation they reach, not in what they
+       ;; return; `document-sha256-agrees-across-hosts` pins that.
+       :cljs (mf/hexify (mf/sha256 bytes)))))
 
 (defn- bytes->hex
   "Lowercase hex of a byte array."
