@@ -1834,6 +1834,16 @@
     (trap! code {:index index :size size}))
   #?(:clj (int index) :cljs (js/Number index)))
 
+(defn- container-host-index
+  "An already bounds-checked i64 index, as an index the host container
+  accepts. On cljs an i64 is a BigInt and `nth` / `assoc` / `subvec` / `inc`
+  all reject one, so every in-range document index threw while the
+  out-of-range one returned a clean `none` -- the broken path was the quieter
+  of the two. Callers keep their own i64 range check; this only converts the
+  value they already admitted."
+  [index]
+  #?(:clj (int index) :cljs (js/Number index)))
+
 (defn- disjoint-root [parents start]
   (loop [current start remaining (inc (count parents))]
     (when (zero? remaining)
@@ -2939,13 +2949,13 @@
             (let [index (value/bounded-typed-value!
                          :i64 (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
               (if (and (not (neg? index)) (< index (count items)))
-                [[:option :document] true (nth items index)]
+                [[:option :document] true (nth items (container-host-index index))]
                 [[:option :document] false]))
             document-list-at
             (let [index (value/bounded-typed-value!
                          :i64 (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
               (if (and (not (neg? index)) (< index (count items)))
-                [[:option :document] true (nth items index)]
+                [[:option :document] true (nth items (container-host-index index))]
                 [[:option :document] false]))
             document-vector-assoc
             (let [index (value/bounded-typed-value!
@@ -2954,7 +2964,8 @@
                         (eval-expr item-form env functions fuel heap call-stack cap-call))]
               (when-not (and (not (neg? index)) (< index (count items)))
                 (trap! :document-vector-index-out-of-range {:index index :count (count items)}))
-              (value/bounded-document! ["vector" (assoc items index item)]))
+              (value/bounded-document!
+               ["vector" (assoc items (container-host-index index) item)]))
             document-vector-conj
             (let [item (value/bounded-document!
                         (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
@@ -2967,14 +2978,17 @@
               (when-not (and (not (neg? drop-count)) (<= drop-count (count items)))
                 (trap! :document-vector-drop-out-of-range
                        {:count drop-count :items (count items)}))
-              (value/bounded-document! ["vector" (subvec items drop-count)]))
+              (value/bounded-document!
+               ["vector" (subvec items (container-host-index drop-count))]))
             document-vector-remove
             (let [index (value/bounded-typed-value!
                          :i64 (eval-expr index-or-item-form env functions fuel heap call-stack cap-call))]
               (when-not (and (not (neg? index)) (< index (count items)))
                 (trap! :document-vector-index-out-of-range {:index index :count (count items)}))
-              (value/bounded-document!
-               ["vector" (vec (concat (subvec items 0 index) (subvec items (inc index))))]))))
+              (let [at (container-host-index index)]
+                (value/bounded-document!
+                 ["vector" (vec (concat (subvec items 0 at)
+                                        (subvec items (inc at))))])))))
 
         (= op 'document-map-entry-at)
         (let [[tag entries]
@@ -2984,7 +2998,7 @@
                      :i64 (eval-expr (second args) env functions fuel heap call-stack cap-call))]
           (when-not (= "map" tag) (trap! :document-map-required {:tag tag}))
           (if (and (not (neg? index)) (< index (count entries)))
-            (let [[key item] (nth entries index)]
+            (let [[key item] (nth entries (container-host-index index))]
               [[:option :document] true
                (value/bounded-document! ["vector" [key item]])])
             [[:option :document] false]))

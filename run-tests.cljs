@@ -12,6 +12,7 @@
 (ns run-tests
   (:require [cljs.test :as t]
             [kotoba.kir-cljs-i64-ashr-test]
+            [kotoba.kir-document-container-index-test]
             [kotoba.kir-host-stack-trap-test]
             [kotoba.kir-kernel-memory-test]
             [kotoba.kir-loop-helper-tail-position-test]))
@@ -23,6 +24,7 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.kir-cljs-i64-ashr-test
+             'kotoba.kir-document-container-index-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-kernel-memory-test
              'kotoba.kir-loop-helper-tail-position-test)
