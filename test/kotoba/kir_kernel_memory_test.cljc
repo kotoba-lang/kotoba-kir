@@ -36,6 +36,7 @@
 (def ^:private subregion (module '[base length offset sublen]
                                  '(kernel-subregion base length offset sublen)))
 (def ^:private try-lock  (module '[base length index] '(kernel-try-lock-u32 base length index)))
+(def ^:private unlock    (module '[base length index] '(kernel-unlock-u32 base length index)))
 
 ;; --- the refusal that has to survive ---------------------------------------
 
@@ -44,10 +45,20 @@
     (is (= :kernel-memory-unavailable (:trap data)))
     (is (= 'kernel-load-u8 (:operation data)))))
 
-(deftest a-lock-refuses-even-with-an-image
-  ;; An image says what the bytes ARE. A lock asks who got there first.
-  (let [data (trapped #(run try-lock [4096 4 0] {:memory (image 4096 [0 0 0 0])}))]
-    (is (= :kernel-memory-unavailable (:trap data)))))
+(deftest a-lock-answers-once-someone-supplies-the-word
+  ;; This test asserted the opposite, and the reason it changed is the point.
+  ;; The refusal was argued from a race -- an image says what the bytes are, a
+  ;; lock asks who got there first -- but the operation is a compare-and-swap
+  ;; against a comparand and a replacement it fixes itself, over bytes the
+  ;; caller wrote, in an interpreter with one thread. That is determined.
+  ;;
+  ;; What it still cannot model is contention, which is why the assertions
+  ;; below are about a free word and a held one and never about two callers.
+  ;; The half of the old refusal that was always right is kept by
+  ;; `without-an-image-the-lock-still-refuses`.
+  (let [mem (image 4096 [0 0 0 0])]
+    (is (= 1 (w (run try-lock [4096 4 0] {:memory mem}))))
+    (is (= 0 (w (run try-lock [4096 4 0] {:memory mem}))))))
 
 ;; --- reads and writes ------------------------------------------------------
 
@@ -170,3 +181,59 @@
 (deftest a-byte-outside-0-255-is-refused
   (is (some? (trapped #(kir/execute load-u8 'main [4096 3 0]
                                     {:memory (image 4096 [1 2 256])})))))
+
+;; --- the lock pair, on a supplied image ------------------------------------
+;; These model the UNCONTENDED case and nothing else. There is one thread here,
+;; so a green vector says the object takes a free lock and releases a held one;
+;; it says nothing about two callers.
+
+
+(deftest a-free-lock-is-taken-and-written
+  (let [mem (image 4096 [0 0 0 0])]
+    (is (= 1 (w (run try-lock [4096 4 0] {:memory mem}))))
+    (is (= [1 0 0 0] @(:bytes mem)))))
+
+(deftest a-held-lock-is-not-taken-and-not-written
+  (let [mem (image 4096 [1 0 0 0])]
+    (is (= 0 (w (run try-lock [4096 4 0] {:memory mem}))))
+    (is (= [1 0 0 0] @(:bytes mem)))))
+
+(deftest a-held-lock-is-released
+  (let [mem (image 4096 [1 0 0 0])]
+    (is (= 1 (w (run unlock [4096 4 0] {:memory mem}))))
+    (is (= [0 0 0 0] @(:bytes mem)))))
+
+(deftest releasing-a-free-lock-changes-nothing
+  (let [mem (image 4096 [0 0 0 0])]
+    (is (= 0 (w (run unlock [4096 4 0] {:memory mem}))))
+    (is (= [0 0 0 0] @(:bytes mem)))))
+
+(deftest a-word-that-is-neither-zero-nor-one-is-not-swapped
+  ;; The comparand is exact. A lock word holding anything else is held by
+  ;; nobody this operation can name, and both directions leave it alone.
+  (let [mem (image 4096 [7 0 0 0])]
+    (is (= 0 (w (run try-lock [4096 4 0] {:memory mem}))))
+    (is (= 0 (w (run unlock [4096 4 0] {:memory mem}))))
+    (is (= [7 0 0 0] @(:bytes mem)))))
+
+(deftest the-lock-ceiling-is-four-kilobytes-not-five-hundred-and-twelve
+  ;; `machine-ir` gives the pair `[:gmir/kernel-try-lock-u32 4096]`, so a
+  ;; length the u32 loads would refuse is admitted here.
+  (let [mem (image 4096 (vec (repeat 1024 0)))]
+    (is (= 1 (w (run try-lock [4096 1024 0] {:memory mem}))))
+    (let [data (trapped #(run try-lock [4096 4097 0] {:memory mem}))]
+      (is (= :length-above-profile-maximum (:check data)))
+      (is (= 4096 (:maximum data))))))
+
+(deftest a-lock-needs-four-bytes-after-the-index
+  (let [mem (image 4096 [0 0 0 0 0 0])
+        data (trapped #(run try-lock [4096 6 3] {:memory mem}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :four-byte-access-outside-window (:check data)))))
+
+(deftest without-an-image-the-lock-still-refuses
+  ;; Unchanged, and this is the half of the old refusal that was always right:
+  ;; with nothing supplied there is nothing to compare against.
+  (let [data (trapped #(run try-lock [4096 4 0] {}))]
+    (is (= :kernel-memory-unavailable (:trap data)))
+    (is (= 'kernel-try-lock-u32 (:operation data)))))

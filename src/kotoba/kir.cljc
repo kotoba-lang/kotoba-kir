@@ -1300,10 +1300,17 @@
 ;; The kernel branch in `eval-expr` used to refuse every memory operation for
 ;; the same reason it still refuses `kernel-in-u8` and `kernel-read-msr`: this
 ;; interpreter cannot invent what the machine holds. That argument is right
-;; about a device bus, a model-specific register and a race for a lock. It is
-;; NOT right about `kernel-load-u8` on a CALLER-OWNED buffer. Those bytes are
-;; not a property of the machine; they are an argument, and a caller that
-;; supplies them has told the oracle what they are.
+;; about a device bus and a model-specific register. It is NOT right about
+;; `kernel-load-u8` on a CALLER-OWNED buffer. Those bytes are not a property
+;; of the machine; they are an argument, and a caller that supplies them has
+;; told the oracle what they are.
+;;
+;; The lock pair was on the wrong side of that line for one release. Its
+;; refusal was argued from a race -- who got there first -- but with an image
+;; the operation is a compare-and-swap against a comparand and a replacement
+;; the OPERATION fixes, over bytes the caller wrote, in an interpreter with one
+;; thread. Determined, not invented. What it does not model is contention, and
+;; the branch below says so where it is easy to read.
 ;;
 ;; Refusing them anyway cost every byte-walking decision object its off-target
 ;; oracle. aiueos records the consequence in its own words:
@@ -1335,7 +1342,12 @@
     kernel-store-u8    [512 1]
     kernel-store-u8-4k [4096 1]
     kernel-load-u32    [512 4]
-    kernel-store-u32   [512 4]})
+    kernel-store-u32   [512 4]
+    ;; The lock pair's ceiling is 4096, not 512: `kotoba.native.machine-ir`
+    ;; gives them `[:gmir/kernel-try-lock-u32 4096]`. The width is the same
+    ;; four bytes, so the `length - index >= 4` rule applies to them too.
+    kernel-try-lock-u32 [4096 4]
+    kernel-unlock-u32   [4096 4]})
 
 (defn- word-above?
   "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
@@ -1472,7 +1484,23 @@
                     (+ slot 1) (word-byte value 8)
                     (+ slot 2) (word-byte value 16)
                     (+ slot 3) (word-byte value 24))
-            value)))))
+            value)
+
+        ;; `lock cmpxchg` with the operation's own comparand and replacement:
+        ;; 0 -> 1 to take, 1 -> 0 to release. Returns 1 when the swap happened.
+        (kernel-try-lock-u32 kernel-unlock-u32)
+        (let [image @bytes
+              observed (+ (nth image slot)
+                          (* 256 (nth image (+ slot 1)))
+                          (* 65536 (nth image (+ slot 2)))
+                          (* 16777216 (nth image (+ slot 3))))
+              [expected desired] (if (= op 'kernel-try-lock-u32) [0 1] [1 0])]
+          (if (= observed expected)
+            (do (vswap! bytes assoc
+                        slot (bit-and desired 255)
+                        (+ slot 1) 0 (+ slot 2) 0 (+ slot 3) 0)
+                (->word 1))
+            (->word 0)))))))
 
 (defn- validated-memory
   "Admit an optional `:memory` image for `execute`."
@@ -3114,25 +3142,29 @@
               option-type [:option type]]
           (if (= tag (name type)) [option-type true payload] [option-type false]))
 
-        ;; `kernel-try-lock-u32`/`kernel-unlock-u32` refuse whether or not an
-        ;; image was supplied, and the reason is the one that separates them
-        ;; from the loads below. Their VALUE is whether this caller won a race,
-        ;; which is a property of the machine at run time. Answering would not
-        ;; merely invent a value: every call site branches on it, so an
-        ;; invented answer becomes "the lock was free" decided by a compiler
-        ;; that has never seen the memory. An image says what the bytes ARE; a
-        ;; lock asks who got there first, and no image can say.
-        (contains? '#{kernel-try-lock-u32 kernel-unlock-u32} op)
-        (trap! :kernel-memory-unavailable {:operation op})
-
-        ;; The loads, the stores and `kernel-subregion` refused for a DIFFERENT
-        ;; reason -- nobody had supplied the bytes -- and that reason is now
-        ;; answerable. See `kernel-memory-profile` above for why the two cases
-        ;; were ever one, and what it cost. With no `:memory` this is the same
-        ;; refusal, unchanged.
+        ;; The loads, the stores, `kernel-subregion` and the lock pair. With no
+        ;; `:memory` every one of them refuses exactly as before.
+        ;;
+        ;; The lock pair used to refuse EVEN WITH an image, and the reason
+        ;; deserves its epitaph: their value is whether this caller won a race,
+        ;; so answering was said to invent "the lock was free" from a compiler
+        ;; that had never seen the memory. That was right while there was
+        ;; nothing to consult. It stopped being right when the caller began
+        ;; supplying the word: `kernel-try-lock-u32` is a compare-and-swap
+        ;; against a comparand and a replacement THE OPERATION fixes (0 -> 1,
+        ;; and 1 -> 0 for unlock), so on bytes the caller wrote, in an
+        ;; interpreter with one thread, the answer is determined rather than
+        ;; invented.
+        ;;
+        ;; The boundary, which any receipt built on this has to carry: it
+        ;; models the UNCONTENDED case and nothing else. A vector that takes
+        ;; the lock and gets 1 has shown that the object takes a free lock. It
+        ;; has not shown anything whatsoever about two callers, because there
+        ;; is only ever one here.
         (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
                       kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32} op)
+                      kernel-load-u32 kernel-store-u32
+                      kernel-try-lock-u32 kernel-unlock-u32} op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
            op memory
