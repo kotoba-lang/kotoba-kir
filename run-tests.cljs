@@ -13,6 +13,7 @@
   (:require [cljs.test :as t]
             [kotoba.kir-cljs-i64-ashr-test]
             [kotoba.kir-host-stack-trap-test]
+            [kotoba.kir-kernel-memory-test]
             [kotoba.kir-loop-helper-tail-position-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
@@ -23,4 +24,5 @@
 
 (t/run-tests 'kotoba.kir-cljs-i64-ashr-test
              'kotoba.kir-host-stack-trap-test
+             'kotoba.kir-kernel-memory-test
              'kotoba.kir-loop-helper-tail-position-test)
