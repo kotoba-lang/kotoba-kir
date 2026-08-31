@@ -16,7 +16,8 @@
             [kotoba.kir-document-sha256-test]
             [kotoba.kir-host-stack-trap-test]
             [kotoba.kir-kernel-memory-test]
-            [kotoba.kir-loop-helper-tail-position-test]))
+            [kotoba.kir-loop-helper-tail-position-test]
+            [kotoba.kir-uleb-i64-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -29,4 +30,5 @@
              'kotoba.kir-document-sha256-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-kernel-memory-test
-             'kotoba.kir-loop-helper-tail-position-test)
+             'kotoba.kir-loop-helper-tail-position-test
+             'kotoba.kir-uleb-i64-test)

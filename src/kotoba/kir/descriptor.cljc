@@ -49,8 +49,30 @@
                (contains? #{:option :result :variant :vector :set :map :record :ref}
                           (first value))))))
 
+(defn- host-integer
+  "N as an integer the host's bit operations accept. On ClojureScript an i64 is
+  a BigInt -- a capability id reaches this encoder as one -- and `bit-and`
+  against a Number literal throws `Cannot mix BigInt and other types`, so
+  emitting any module with a capability contract failed there. Every operand
+  this file encodes is a count, index, id or byte length, so the conversion is
+  exact; one that is not exactly representable is refused rather than
+  silently truncated into a shorter LEB128.
+
+  Written out rather than requiring `kotoba.kir.cljs-i64`, because this
+  namespace's extraction premise is that the descriptor half does not depend
+  on it."
+  [n]
+  #?(:clj n
+     :cljs (if (try (identical? js/BigInt (.-constructor n))
+                    (catch :default _ false))
+             (if (<= n (js/BigInt js/Number.MAX_SAFE_INTEGER))
+               (js/Number n)
+               (throw (ex-info "uleb operand is not exactly representable"
+                               {:phase :descriptor :operand (str n)})))
+             n)))
+
 (defn uleb [n]
-  (loop [n n out []]
+  (loop [n (host-integer n) out []]
     (let [byte (bit-and n 0x7f)
           remaining (unsigned-bit-shift-right n 7)]
       (if (zero? remaining)
