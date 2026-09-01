@@ -2762,8 +2762,14 @@
         (let [n (eval-expr (first args) env functions fuel heap call-stack cap-call)]
           (when (or (neg? n) (> n value/vector-item-limit))
             (trap! :vector-alloc-out-of-range {:count n}))
+          ;; The zero is per-runtime: on ClojureScript an i64 item must be a
+          ;; BigInt (`i64/bigint-value?`), and a plain 0 is refused with
+          ;; "vector item is not a signed i64" -- which is what a million-slot
+          ;; allocation answered the first time it was compiled. The JVM half
+          ;; was fine, so only the runtime that deploys was broken.
           (value/bounded-vector-i64!
-           (vec (repeat #?(:clj n :cljs (js/Number n)) 0))))
+           (vec (repeat #?(:clj n :cljs (js/Number n))
+                        #?(:clj 0 :cljs (js/BigInt 0))))))
 
         ;; `vector-assoc!` is the SAME operation here, deliberately.
         ;;
