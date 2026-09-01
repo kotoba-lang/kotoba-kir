@@ -70,7 +70,7 @@
      xml-path-count xml-name-count xml-name-text xml-path-text xml-path-attr
      decimal-f64-parse decimal-f64x3-parse
      record-new record-get record-assoc record-equal
-     vector-count vector-get vector-at vector-drop vector-assoc vector-assoc! vector-conj
+     vector-count vector-get vector-at vector-drop vector-assoc vector-assoc! vector-conj vector-alloc
      vector-f64-new vector-f64-count vector-f64-get vector-f64-at
      vector-f64-drop vector-f64-assoc vector-f64-conj
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
@@ -618,7 +618,7 @@
                   ;; one host call per element; the element-count bound that
                   ;; makes that expansion finite is `vector-item-limit`, and it
                   ;; is enforced where the value is built, not here.
-                  (contains? '#{vector-new vector-count vector-get vector-at
+                  (contains? '#{vector-new vector-alloc vector-count vector-get vector-at
                                 vector-drop vector-assoc vector-assoc! vector-conj
                                 vector-f64-new vector-f64-count vector-f64-get
                                 vector-f64-at vector-f64-drop vector-f64-assoc
@@ -2750,6 +2750,20 @@
             (trap! :vector-drop-out-of-range {:count drop-count}))
           (value/bounded-vector-i64!
            (subvec items #?(:clj drop-count :cljs (js/Number drop-count)))))
+
+        ;; A vector of `n` zeros.
+        ;;
+        ;; `vector-new` is variadic, so building a million-slot struct of
+        ;; arrays through it would need a million arguments in source -- and
+        ;; the literal limit refuses that long before the item limit does,
+        ;; which is correct: nobody writes a book as a literal. This is the
+        ;; allocation `torihiki.slab/alloc` is, expressed once.
+        (= op 'vector-alloc)
+        (let [n (eval-expr (first args) env functions fuel heap call-stack cap-call)]
+          (when (or (neg? n) (> n value/vector-item-limit))
+            (trap! :vector-alloc-out-of-range {:count n}))
+          (value/bounded-vector-i64!
+           (vec (repeat #?(:clj n :cljs (js/Number n)) 0))))
 
         ;; `vector-assoc!` is the SAME operation here, deliberately.
         ;;
