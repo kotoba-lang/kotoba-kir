@@ -223,7 +223,14 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a signed i64"
                         (value/bounded-vector-i64! [1 "2"])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"exceeds item limit"
-                        (value/bounded-vector-i64! (vec (range 16385))))))
+                        ;; One past the limit, derived rather than written
+                        ;; out: this pinned 16385 and went green for the wrong
+                        ;; reason the moment the limit moved -- it asserted a
+                        ;; refusal at a length that was simply no longer over
+                        ;; the line. Deriving it means the assertion follows
+                        ;; the constant it is about.
+                        (value/bounded-vector-i64!
+                         (vec (range (inc value/vector-item-limit)))))))
 
 (deftest typed-map-values-have-canonical-order-typed-values-and-no-sentinel
   (let [type [:map :keyword [:option :string]]
