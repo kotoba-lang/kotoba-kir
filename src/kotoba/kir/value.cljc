@@ -33,7 +33,17 @@
 ;;
 ;; Still a limit and still fail-closed. 8 MB per i64 field is a real cost, and
 ;; a guest asking for more is refused rather than allowed to exhaust the host.
-(def vector-item-limit 1048576)
+(def vector-item-limit 16384)
+;; Raised to 1048576 for the order book above, then put back on 2026-09-01.
+;; The in-place lowering had to land first -- raising the ceiling before it
+;; only makes each copy bigger -- and it now has, so the argument above is no
+;; longer premature. It is still a SEPARATE decision: lang/surface-status.edn
+;; records :arena-bounds as :not-met with its own fail-closed argument owing,
+;; and amu's component test asserts that a length one past this traps in the
+;; core. Raising it silently inside the lowering change made that test pass
+;; for the wrong reason -- the guest was admitted, not refused -- which is
+;; the shape this file exists to prevent. Raise it with the native arena, the
+;; host budget and that test in one change that argues for the number.
 ;; Canonical ABI `[:list item-descriptor]` item-count bound (see
 ;; kotoba.wasm.canonical-abi's `list-layout`). Deliberately the same
 ;; order of magnitude as this file's other bounded-sequential-collection
