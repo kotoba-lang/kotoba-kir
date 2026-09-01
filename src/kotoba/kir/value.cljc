@@ -14,7 +14,26 @@
 (def symbol-value-byte-limit 512)
 (def map-entry-limit 128)
 (def vector-literal-item-limit 128)
-(def vector-item-limit 16384)
+;; How many items one `vector-i64` / `vector-f64` may hold.
+;;
+;; 16,384 for as long as every element write COPIED the whole vector: the
+;; native host memmoved and bump-allocated, the Wasm host did `[...checked]`
+;; and froze, and `assertValue` re-scanned every element on every operation.
+;; Under that, a bigger vector only bought a bigger copy -- raising this would
+;; have made programs slower rather than possible.
+;;
+;; `vector-assoc!` removes the copy and the linear-value scan skip removes the
+;; per-operation walk (superproject ADR-2609010200), so the number is now set
+;; by what a guest needs rather than by what a copy costs.
+;;
+;; 1,048,576 because that is `torihiki.book`'s default `cap` -- one slot per
+;; resting order in a struct of arrays. Chosen against a real program rather
+;; than rounded up: a limit nobody's workload explains is a limit nobody can
+;; argue with when it turns out to be wrong.
+;;
+;; Still a limit and still fail-closed. 8 MB per i64 field is a real cost, and
+;; a guest asking for more is refused rather than allowed to exhaust the host.
+(def vector-item-limit 1048576)
 ;; Canonical ABI `[:list item-descriptor]` item-count bound (see
 ;; kotoba.wasm.canonical-abi's `list-layout`). Deliberately the same
 ;; order of magnitude as this file's other bounded-sequential-collection
