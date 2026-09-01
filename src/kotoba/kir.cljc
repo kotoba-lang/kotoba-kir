@@ -70,7 +70,7 @@
      xml-path-count xml-name-count xml-name-text xml-path-text xml-path-attr
      decimal-f64-parse decimal-f64x3-parse
      record-new record-get record-assoc record-equal
-     vector-count vector-get vector-at vector-drop vector-assoc vector-conj
+     vector-count vector-get vector-at vector-drop vector-assoc vector-assoc! vector-conj
      vector-f64-new vector-f64-count vector-f64-get vector-f64-at
      vector-f64-drop vector-f64-assoc vector-f64-conj
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
@@ -619,7 +619,7 @@
                   ;; makes that expansion finite is `vector-item-limit`, and it
                   ;; is enforced where the value is built, not here.
                   (contains? '#{vector-new vector-count vector-get vector-at
-                                vector-drop vector-assoc vector-conj
+                                vector-drop vector-assoc vector-assoc! vector-conj
                                 vector-f64-new vector-f64-count vector-f64-get
                                 vector-f64-at vector-f64-drop vector-f64-assoc
                                 vector-f64-conj}
@@ -2723,7 +2723,17 @@
           (value/bounded-vector-i64!
            (subvec items #?(:clj drop-count :cljs (js/Number drop-count)))))
 
-        (= op 'vector-assoc)
+        ;; `vector-assoc!` is the SAME operation here, deliberately.
+        ;;
+        ;; The bang says the caller has proved the handle is dead afterwards,
+        ;; which lets a backend lower the update to a store instead of a copy.
+        ;; That is a lowering, not a semantics: if the old handle is really
+        ;; dead, in-place and copy are indistinguishable to every observer. So
+        ;; the reference interpreter -- the thing other backends are checked
+        ;; against -- must not distinguish them either, or the bang would
+        ;; change what a program means and the whole argument for admitting it
+        ;; would be false.
+        (contains? '#{vector-assoc vector-assoc!} op)
         (let [[items-form index-form item-form] args
               items (value/bounded-vector-i64!
                      (eval-expr items-form env functions fuel heap call-stack cap-call))
