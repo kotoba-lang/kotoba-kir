@@ -1,5 +1,7 @@
 (ns kotoba.kir-definition-identity-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing]]
             [cbor.core :as cbor]
             [kotoba.kir.definition-identity :as identity]))
 
@@ -84,14 +86,109 @@
       (is (= frozen-pure-const-cid (identity/definition-cid pure)))
       (is (not= (identity/definition-cid pure) (identity/definition-cid effectful))))))
 
-(deftest compiler-wire-effect-rows-are-not-yet-hashable
-  (testing "(c) measured 2026-09-02: kotoba-sema's infer-effects emits
-            [:cap/call id] vectors, and this namespace admits keyword members
-            only. The refusal is pinned by its message so that bridging the
-            vocabulary must also revisit this record and the contract entry
-            lang/code-identity.edn :definition-cid :effect-row-vocabulary."
+;; ---------------------------------------------------------------------------
+;; effect-row vocabulary bridge (2026-09-02)
+;; ---------------------------------------------------------------------------
+
+(def ^:private catalog
+  "A fixture catalog in the shape of kotoba.sema/capability-id->name. The
+  real catalog lives in kotoba-sema, which depends on this repository, so the
+  bridge takes the mapping as an argument and this suite supplies one."
+  {3 :hash/sha256
+   5 :clock/now
+   8 :state/transact
+   9 :log/write})
+
+(deftest compiler-wire-effect-rows-are-refused-and-bridged
+  (testing "(c) a row taken straight from infer-effects is still refused by
+            the identity: the sealed vocabulary is the named operation, and
+            the wire id is ABI"
     (let [wire-row (assoc vector-definition :definition/effect-row #{[:cap/call 8]})
           error (identity/definition-error wire-row)]
       (is (= "definition effect row members must be keywords" (:message error)))
-      (is (thrown? clojure.lang.ExceptionInfo (identity/definition-cid wire-row))
-          "no CID is minted over a row whose vocabulary the contract has not named"))))
+      (is (thrown? clojure.lang.ExceptionInfo (identity/definition-cid wire-row)))))
+  (testing "(d) the bridge translates the compiler's report to the keyword row
+            the identity seals, and the result hashes to the frozen vector a
+            hand-resolved row hashes to -- the bridge adds no encoding"
+    (let [hir {:effects #{[:cap/call 8] [:cap/call 5]}
+               :named-operations (sorted-set :state/transact :clock/now)}
+          row (identity/effect-row-from-hir hir {:id->name catalog})]
+      (is (= #{:state/transact :clock/now} row))
+      (is (nil? (identity/definition-error
+                 (assoc vector-definition :definition/effect-row row))))
+      (is (= (identity/definition-cid (assoc vector-definition :definition/effect-row row))
+             (identity/definition-cid (assoc vector-definition
+                                             :definition/effect-row #{:clock/now :state/transact})))
+          "a bridged row and a hand-resolved row are the same identity")
+      (is (= frozen-effect-row-http-cid
+             (identity/definition-cid
+              (assoc vector-definition :definition/effect-row
+                     (identity/effect-row-from-hir {:effects #{[:cap/call 42]}}
+                                                   {:id->name {42 :host/http}}))))
+          "the frozen :effect-row-http vector is reachable through the bridge")))
+  (testing "(e) a numeric cap-call with no named operation still bridges: the
+            catalog names it, and :named-operations is provenance, not the
+            source of the translation"
+    (is (= #{:log/write}
+           (identity/effect-row-from-hir {:effects #{[:cap/call 9]} :named-operations #{}}
+                                         {:id->name catalog}))))
+  (testing "(f) a per-function row may be a subset of the module's named
+            operations -- that is not a disagreement"
+    (is (= #{:clock/now}
+           (identity/effect-row-from-hir {:effects #{[:cap/call 5]}
+                                          :named-operations #{:clock/now :state/transact}}
+                                         {:id->name catalog}))))
+  (testing "(g) an empty compiler row is the empty sealed row: pure stays pure"
+    (is (= #{} (identity/effect-row-from-hir {:effects #{} :named-operations #{}}
+                                             {:id->name catalog})))))
+
+(defn- bridge-failure [hir opts]
+  (try (identity/effect-row-from-hir hir opts)
+       nil
+       (catch clojure.lang.ExceptionInfo e
+         {:message (.getMessage e) :data (ex-data e)})))
+
+(deftest unnamed-wire-ids-are-refused-not-guessed
+  (testing "the refusal, by its exact message: a wire id the catalog cannot
+            name gets no keyword and therefore no CID"
+    (let [failure (bridge-failure {:effects #{[:cap/call 8] [:cap/call 200]}
+                                   :named-operations #{:state/transact}}
+                                  {:id->name catalog})]
+      (is (= "effect row wire id has no catalog name: [:cap/call 200]" (:message failure)))
+      (is (= :definition/effect-row-unbridged (get-in failure [:data :problem])))
+      (is (= 200 (get-in failure [:data :wire-id])))))
+  (testing "a member that is not a wire capability call is not a compiler row"
+    (is (re-find #"not a wire capability call"
+                 (:message (bridge-failure {:effects #{:state/transact}} {:id->name catalog}))))
+    (is (re-find #"not a wire capability call"
+                 (:message (bridge-failure {:effects #{[:cap/call "8"]}} {:id->name catalog})))))
+  (testing "provenance the catalog cannot account for is refused, not resolved"
+    (is (re-find #"has no catalog id"
+                 (:message (bridge-failure {:effects #{[:cap/call 8]}
+                                            :named-operations #{:not/registered}}
+                                           {:id->name catalog})))))
+  (testing "a catalog that would seal two wire rows as one identity is refused"
+    (is (re-find #"two wire ids to one operation name"
+                 (:message (bridge-failure {:effects #{[:cap/call 8]}}
+                                           {:id->name (assoc catalog 200 :state/transact)})))))
+  (testing "the mapping is required; a bridge with nothing to translate by
+            cannot answer"
+    (is (re-find #"requires :id->name"
+                 (:message (bridge-failure {:effects #{[:cap/call 8]}} {}))))))
+
+;; ---------------------------------------------------------------------------
+;; the bridge changed no frozen byte
+;; ---------------------------------------------------------------------------
+
+(def ^:private frozen-vectors-file
+  "test/kotoba/kir/fixtures/code-identity-vectors.edn")
+
+(deftest every-frozen-vector-is-byte-identical-after-the-bridge
+  (let [table (edn/read-string (slurp (io/file frozen-vectors-file)))]
+    (is (= identity/payload-version (:payload-version table)))
+    (is (= 10 (count (:vectors table))) "the copied table is the 10-vector table")
+    (doseq [{:keys [id definition canonical-hex definition-cid]} (:vectors table)]
+      (is (= canonical-hex (identity/canonical-hex definition))
+          (str id ": canonical bytes moved"))
+      (is (= definition-cid (identity/definition-cid definition))
+          (str id ": definition CID moved")))))
