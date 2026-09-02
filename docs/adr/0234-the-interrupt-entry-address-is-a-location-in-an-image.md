@@ -1,4 +1,4 @@
-# ADR 0233: The interrupt entry address is a location in an image, so the oracle refuses it
+# ADR 0234: The interrupt entry address is a location in an image, so the oracle refuses it
 
 ## Status
 
