@@ -2266,6 +2266,81 @@
       (walk body true))
     @found))
 
+(defn- core-form-shape-violation
+  "The first core form in BODY whose shape is not the one the interpreter and
+  every backend destructure, or nil.
+
+  `let` takes a binding vector and ONE body form; `if` takes exactly three
+  parts. Both rules were assumptions here rather than checks -- `eval-expr`
+  reads `(let [[bindings body] args] ...)` and `(let [[test then else] args]
+  ...)`, so a longer form ran its FIRST body / its `then` and the rest of the
+  program was silently absent.
+
+  That is not hypothetical, and it is not only an HIR-producer question: the
+  frontend had the identical hole on the way in, and until 2026-09-02
+
+    (defn run [n :i64] :i64 (let [x (+ n 1)] (+ x 10) (+ x 100)))
+
+  compiled with :ok true and answered 16 rather than 106. `hir/validate!`
+  checks the module envelope, not the shape of an expression, so nothing
+  between an arbitrary `kotoba.hir/v3` producer and the interpreter was
+  looking.
+
+  Refusing is right rather than making it work -- several body forms on a head
+  that takes one did not come from the frontend, which collapses them into a
+  `do`, and there is no principled way to guess which one the author meant.
+  Sequencing belongs to `do`, which is variadic on purpose and is checked here
+  only for emptiness.
+
+  The binding VECTOR is stepped through as pairs, never walked as a form: it is
+  a vector of binder/value, and treating it as an expression is how a related
+  gate next door admitted typed operations it meant to check."
+  [body]
+  (let [found (volatile! nil)]
+    (letfn [(walk [form]
+              (when (and (nil? @found) (seq? form) (seq form))
+                (let [[op & args] form]
+                  (cond
+                    (= op 'let)
+                    (let [bindings (first args)
+                          body-forms (rest args)]
+                      (if (not= 1 (count body-forms))
+                        (vswap! found (constantly
+                                       {:rejected :let-body-not-one-form
+                                        :form form
+                                        :body-forms (count body-forms)}))
+                        (do (when (sequential? bindings)
+                              (doseq [v (take-nth 2 (rest bindings))] (walk v)))
+                            (walk (first body-forms)))))
+
+                    (= op 'if)
+                    (if (not= 3 (count args))
+                      (vswap! found (constantly {:rejected :if-not-ternary
+                                                 :form form
+                                                 :arity (count args)}))
+                      (doseq [a args] (walk a)))
+
+                    (= op 'do)
+                    (if (empty? args)
+                      (vswap! found (constantly {:rejected :do-empty :form form}))
+                      (doseq [a args] (walk a)))
+
+                    :else (doseq [a args] (walk a))))))]
+      (walk body))
+    @found))
+
+(def ^:private core-form-shape-messages
+  {:let-body-not-one-form "let takes a binding vector and one body form"
+   :if-not-ternary "if takes exactly three parts: test, then, else"
+   :do-empty "do takes at least one form"})
+
+(defn- reject-core-form-shape-violations! [module]
+  (doseq [function (:functions module)
+          :let [violation (core-form-shape-violation (:body function))]
+          :when violation]
+    (throw (ex-info (get core-form-shape-messages (:rejected violation))
+                    (assoc violation :phase :ir :function (:name function))))))
+
 (defn- reject-loop-helper-self-calls-off-tail! [hir]
   (doseq [function (:functions hir)
           :when (loop-helper-name? (:name function))
@@ -3958,6 +4033,7 @@
    (when-not (and (integer? kgraph-capacity) (<= 0 kgraph-capacity default-kgraph-capacity))
      (throw (ex-info "kgraph capacity is outside runtime limits"
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
+   (reject-core-form-shape-violations! kir)
    (doseq [function (:functions kir)]
      (validated-closure-param-indexes function)
      (validated-i64-pair-chain-param-indexes function)
@@ -4071,6 +4147,7 @@
 
 (defn lower [hir]
   (hir/validate! hir)
+  (reject-core-form-shape-violations! hir)
   (reject-loop-helper-self-calls-off-tail! hir)
   (let [kernel-operations
         (into
