@@ -1551,6 +1551,35 @@
      kernel-rdtsc kernel-rdtscp kernel-swapgs})
 ;; sysops: end
 
+;; xsave: the extended-state enable (kotoba-gmir ADR 0012).
+;;
+;; `kernel-xgetbv` reads what the operating system has agreed to save across a
+;; context switch. These three are how an operating system AGREES: CR4 bit 18
+;; (OSXSAVE) is what `xgetbv` faults without, and `xsetbv` is the only way to
+;; set the XCR0 bits it then reports.
+;;
+;; They refuse HERE for the reason `kernel-read-cr0`/`kernel-write-cr0` refuse
+;; -- which is worth saying, because "model them as cells" is the obvious
+;; alternative and it is wrong. A control register is not this process's state.
+;; CR4 already holds a value chosen by the firmware before the first Kotoba
+;; instruction runs; XCR0 already holds whatever the firmware left. An
+;; interpreter that started at zero and tracked writes would answer
+;; confidently, and every answer would be a value from a machine that does not
+;; exist. Worse than for `cpuid`, because the caller's next act on the answer
+;; is `(kernel-xsetbv 0 (bit-or (kernel-xgetbv 0) 6))` -- a read-modify-write
+;; that would silently CLEAR bits the firmware set.
+;;
+;; The one refusal an interpreter could add and does not: `xsetbv` raises #GP
+;; for a value outside the defined XCR0 bits, and this could check a literal
+;; operand. It does not, because the working spelling passes
+;; `(bit-or (kernel-xgetbv 0) 6)` -- not a literal -- so the check would fire
+;; on exactly the call sites that are wrong and be silent on the real ones. A
+;; guard that only sees the cases nobody writes is worse than none: it reads
+;; as protection.
+(def ^:private kernel-extended-state-operations
+  '#{kernel-read-cr4 kernel-write-cr4 kernel-xsetbv})
+;; xsave: end
+
 ;; boot: the UEFI firmware boundary. `kernel-system-table` is a pointer THE
 ;; FIRMWARE chose; `kernel-load-ptr` reads memory the firmware owns;
 ;; `kernel-uefi-call2` runs the firmware's own code; `kernel-jump-to` does not
@@ -4040,7 +4069,11 @@
                    (concat kernel-system-operations
                            ;; boot: the firmware boundary, for the strongest
                            ;; form of the reason `kernel-in-u8` refuses.
-                           kernel-uefi-operations))
+                           kernel-uefi-operations
+                           ;; xsave: CR4 and XCR0 are firmware-initialised
+                           ;; machine state, and the caller read-modify-writes
+                           ;; them.
+                           kernel-extended-state-operations))
                   op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
@@ -4381,7 +4414,17 @@
                                         kernel-system-operations
                                         kernel-uefi-operations
                                         rodata-address-operations
-                                        kernel-dot-f32-operations))
+                                        kernel-dot-f32-operations
+                                        ;; xsave: and the extended-state
+                                        ;; enable, for the reason the `cpuid`
+                                        ;; four are here. `(kernel-read-cr4)`
+                                        ;; is zero-arity and `(kernel-xsetbv 0
+                                        ;; 7)` is two literals, so a folder
+                                        ;; sees nothing to suggest an effect;
+                                        ;; the interpreter traps rather than
+                                        ;; answering, so a module missing from
+                                        ;; this set does not compile at all.
+                                        kernel-extended-state-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
