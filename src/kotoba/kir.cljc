@@ -1703,6 +1703,54 @@
 (def ^:private kernel-dot-f32-operations '#{kernel-dot-f32})
 ;; simd: end
 
+;; dequant: the fused dequantize-and-dot family (superproject
+;; ADR-2609021900).
+;;
+;; The ORACLE lives here, and the machine is required to agree with it bit for
+;; bit. Two things make that a checkable claim rather than a wish.
+;;
+;; The DEQUANTIZATION EQUATIONS are transcribed from
+;; `os/aiueos/kernel/qwen35_quant.c`, which vendored them from llama.cpp at
+;; 3173a564 (MIT), operation for operation and rounding for rounding. `y =
+;; q*d` is one f32 multiply and not a fused anything; `y = d1*(q&0xF) - m1` is
+;; three, in that order, because that is what the C evaluates.
+;;
+;; The ACCUMULATION TREE is `dot_scalar`'s (`qwen35_infer.c:234`), the same
+;; one `kernel-dot-f32` folds with: four accumulators, the lower half of each
+;; eight-element group before its upper half, `(s0+s1)+(s2+s3)` at the end.
+;; There is no tail: 32, 256 and 256 are all multiples of eight.
+;;
+;; The C has a SECOND tree -- `dot_avx2` reduces its four lanes left to right
+;; -- and picks between them at run time on `qwen_vector_bits`. This family
+;; reproduces the scalar one and says so, because "matches the C" is not a
+;; checkable claim while the C has two answers.
+
+(def ^:private kernel-dequant-dot-formats
+  "Mirrors `kotoba.gmir/kernel-dequant-dot-formats`. `:block-bytes` is
+  `sizeof(block_*)`; `:block-elements` is that format's QK."
+  '{kernel-dequant-dot-q8-0 {:block-bytes 34  :block-elements 32}
+    kernel-dequant-dot-q4-k {:block-bytes 144 :block-elements 256}
+    kernel-dequant-dot-q6-k {:block-bytes 210 :block-elements 256}})
+
+(def ^:private kernel-dequant-dot-operations
+  (set (keys kernel-dequant-dot-formats)))
+
+(def ^:private kernel-dequant-dot-maximum
+  "The byte ceiling on EACH region. Mirrors
+  `kotoba.gmir/kernel-dequant-dot-maximum`, which is the authority."
+  65536)
+
+(defn- kernel-dequant-dot-block-limit
+  "How many blocks that ceiling admits for OP. DERIVED from both strides, so
+  no copy of it can drift: bounding the block count is what keeps
+  `count * block-bytes` and `count * elements * 4` from wrapping a 64-bit
+  multiply before either is compared with a length."
+  [op]
+  (let [{:keys [block-bytes block-elements]} (get kernel-dequant-dot-formats op)]
+    (min (quot kernel-dequant-dot-maximum block-bytes)
+         (quot kernel-dequant-dot-maximum (* 4 block-elements)))))
+;; dequant: end
+
 (def ^:private slice-item-limit
   "2^40 elements. Mirrors `kotoba.gmir/slice-item-limit` and
   `kotoba.mir/slice-item-limit`, and is an ADDRESS-SPACE bound rather than a
@@ -2248,6 +2296,244 @@
              (recur (inc i) (add sum (product i)))
              sum)))))))
 ;; simd: end
+
+;; ── dequant: the fused dequantize-and-dot oracle ────────────────────────────
+
+(defn- i32-bits->f32
+  "A binary32 bit pattern as a host f32 value. Takes a PLAIN integer rather
+  than a runtime word, because every pattern here is built by this file from
+  bytes it just read -- `value/i64-bits-to-f32` wants a runtime word and would
+  need the pattern narrowed to signed i32 first, on two runtimes, for no
+  gain."
+  [bits]
+  #?(:clj (Float/intBitsToFloat (unchecked-int (long bits)))
+     :cljs (let [buffer (js/ArrayBuffer. 4)
+                 view (js/DataView. buffer)]
+             (.setInt32 view 0 (bit-or bits 0) true)
+             (.getFloat32 view 0 true))))
+
+(defn- fp16-bits->f32-bits
+  "`fp16_to_f32` from `os/aiueos/kernel/qwen35_quant.c`, transcribed. Every
+  branch is the C's, including the normalising loop for subnormals and the
+  payload-preserving arm for exponent 31 -- the pattern this returns is the
+  pattern that function returns, for all 65536 inputs.
+
+  The machine does NOT run this. It multiplies by 2^112 instead, in one
+  branch and no loop; `dequant-fp16-agrees-with-the-c` in kotoba-native
+  asserts the two agree over the whole input space, which is what makes the
+  substitution legitimate rather than merely plausible."
+  [half]
+  (let [sign (bit-shift-left (bit-and half 0x8000) 16)
+        exponent (bit-and (bit-shift-right half 10) 0x1f)
+        mantissa (bit-and half 0x3ff)]
+    (cond
+      (zero? exponent)
+      (if (zero? mantissa)
+        sign
+        (loop [m mantissa unbiased -14]
+          (if (zero? (bit-and m 0x400))
+            (recur (bit-shift-left m 1) (dec unbiased))
+            (bit-or sign
+                    (bit-shift-left (+ unbiased 127) 23)
+                    (bit-shift-left (bit-and m 0x3ff) 13)))))
+      (= 31 exponent)
+      (bit-or sign 0x7f800000 (bit-shift-left mantissa 13))
+      :else
+      (bit-or sign
+              (bit-shift-left (+ exponent 112) 23)
+              (bit-shift-left mantissa 13)))))
+
+(defn- image-u8 [image slot] (nth image slot))
+
+(defn- image-i8
+  "One byte as a SIGNED eight-bit integer -- `int8_t`, which is what a Q8_0
+  code and a Q6_K scale are."
+  [image slot]
+  (let [byte (nth image slot)]
+    (if (> byte 127) (- byte 256) byte)))
+
+(defn- image-u16 [image slot]
+  (+ (nth image slot) (* 256 (nth image (+ slot 1)))))
+
+(defn- image-f32
+  "Four little-endian bytes as a host f32. This is the ACTIVATION side, which
+  is plain binary32 in memory."
+  [image slot]
+  (i32-bits->f32 (+ (nth image slot)
+                    (* 256 (nth image (+ slot 1)))
+                    (* 65536 (nth image (+ slot 2)))
+                    (* 16777216 (nth image (+ slot 3))))))
+
+(defn- dequant-half [image slot]
+  (i32-bits->f32 (fp16-bits->f32-bits (image-u16 image slot))))
+
+(defn- q4-k-scale-min
+  "`get_scale_min_k4` (`qwen35_quant.c`), transcribed. Returns [sc m]."
+  [j image slot]
+  (let [q (fn [i] (image-u8 image (+ slot i)))]
+    (if (< j 4)
+      [(bit-and (q j) 63) (bit-and (q (+ j 4)) 63)]
+      [(bit-or (bit-and (q (+ j 4)) 0xF)
+               (bit-shift-left (bit-shift-right (q (- j 4)) 6) 4))
+       (bit-or (bit-shift-right (q (+ j 4)) 4)
+               (bit-shift-left (bit-shift-right (q j) 6) 4))])))
+
+(defn- dequantize-block
+  "One block of OP at SLOT, as a vector of `:block-elements` host f32 values
+  in the order `dequantize_row_*` writes them."
+  [op image slot]
+  (case op
+    kernel-dequant-dot-q8-0
+    ;; `y[j] = x.qs[j] * d` -- one multiply, `int8_t` promoted exactly.
+    (let [d (dequant-half image slot)]
+      (mapv (fn [j] (as-f32 (* (image-i8 image (+ slot 2 j)) d))) (range 32)))
+
+    kernel-dequant-dot-q4-k
+    ;; `d`, `dmin`, twelve packed scales, then 128 bytes of nibble pairs.
+    ;; Each 64-element group takes two (scale, min) pairs: the low nibbles of
+    ;; 32 bytes with the first, the high nibbles of the SAME 32 bytes with the
+    ;; second. `d1*(q&0xF) - m1` is three roundings in that order.
+    (let [d (dequant-half image slot)
+          dmin (dequant-half image (+ slot 2))
+          scales (+ slot 4)
+          qs (+ slot 16)]
+      (vec (mapcat
+            (fn [group]
+              (let [[sc0 m0] (q4-k-scale-min (* 2 group) image scales)
+                    [sc1 m1] (q4-k-scale-min (inc (* 2 group)) image scales)
+                    d1 (as-f32 (* d sc0)) min1 (as-f32 (* dmin m0))
+                    d2 (as-f32 (* d sc1)) min2 (as-f32 (* dmin m1))
+                    base (+ qs (* 32 group))]
+                (concat
+                 (map (fn [l]
+                        (as-f32 (- (as-f32 (* d1 (bit-and (image-u8 image (+ base l)) 0xF)))
+                                   min1)))
+                      (range 32))
+                 (map (fn [l]
+                        (as-f32 (- (as-f32 (* d2 (bit-shift-right (image-u8 image (+ base l)) 4)))
+                                   min2)))
+                      (range 32)))))
+            (range 4))))
+
+    kernel-dequant-dot-q6-k
+    ;; 128 low-nibble bytes, 64 high-bit-pair bytes, 16 signed scales, `d`.
+    ;; `y = d * sc[is] * q` evaluates LEFT TO RIGHT in C, so `d*sc` rounds
+    ;; before it meets the code.
+    (let [ql slot
+          qh (+ slot 128)
+          sc (+ slot 192)
+          d (dequant-half image (+ slot 208))
+          out (transient (vec (repeat 256 (as-f32 0))))]
+      (persistent!
+       (reduce
+        (fn [acc n]
+          (reduce
+           (fn [acc l]
+             (let [is (quot l 16)
+                   low (+ ql (* 64 n) l)
+                   high (+ qh (* 32 n) l)
+                   scale (fn [k] (as-f32 (* d (image-i8 image (+ sc (* 8 n) is (* 2 k))))))
+                   code (fn [byte shift]
+                          (- (bit-or (bit-and byte 0xF)
+                                     (bit-shift-left
+                                      (bit-and (bit-shift-right (image-u8 image high) shift) 3)
+                                      4))
+                             32))
+                   nibble (fn [byte shift]
+                            (- (bit-or (bit-shift-right byte 4)
+                                       (bit-shift-left
+                                        (bit-and (bit-shift-right (image-u8 image high) shift) 3)
+                                        4))
+                               32))
+                   b0 (image-u8 image low)
+                   b1 (image-u8 image (+ low 32))]
+               (-> acc
+                   (assoc! (+ (* 128 n) l 0)
+                           (as-f32 (* (scale 0) (code b0 0))))
+                   (assoc! (+ (* 128 n) l 32)
+                           (as-f32 (* (scale 1) (code b1 2))))
+                   (assoc! (+ (* 128 n) l 64)
+                           (as-f32 (* (scale 2) (nibble b0 4))))
+                   (assoc! (+ (* 128 n) l 96)
+                           (as-f32 (* (scale 3) (nibble b1 6)))))))
+           acc (range 32)))
+        out (range 2))))))
+
+(defn- kernel-dequant-dot-checks!
+  "The seven checks the emitter emits, in the emitter's order, so a program
+  that traps here traps on the machine and vice versa. All unsigned."
+  [op base length second-base second-length blocks]
+  (let [{:keys [block-bytes block-elements]} (get kernel-dequant-dot-formats op)
+        limit (kernel-dequant-dot-block-limit op)]
+    (when (word-above? length kernel-dequant-dot-maximum)
+      (trap! :kernel-memory-fault
+             {:operation op :check :length-above-profile-maximum
+              :length length :maximum kernel-dequant-dot-maximum}))
+    (when (word-above? second-length kernel-dequant-dot-maximum)
+      (trap! :kernel-memory-fault
+             {:operation op :check :second-length-above-profile-maximum
+              :length second-length :maximum kernel-dequant-dot-maximum}))
+    (when (word-zero? base)
+      (trap! :kernel-memory-fault {:operation op :check :null-base}))
+    (when (word-zero? second-base)
+      (trap! :kernel-memory-fault {:operation op :check :null-second-base}))
+    ;; Before either span is formed, not after.
+    (when (word-above? blocks limit)
+      (trap! :kernel-memory-fault
+             {:operation op :check :block-count-above-limit
+              :count blocks :limit limit}))
+    (let [packed-span (word-scale blocks block-bytes)
+          element-span (word-scale blocks (* 4 block-elements))]
+      (when (word-above? packed-span length)
+        (trap! :kernel-memory-fault
+               {:operation op :check :blocks-outside-window
+                :count blocks :length length}))
+      (when (word-above? element-span second-length)
+        (trap! :kernel-memory-fault
+               {:operation op :check :blocks-outside-second-window
+                :count blocks :length second-length}))
+      [packed-span element-span])))
+
+(defn- kernel-dequant-dot-call!
+  "Evaluate one fused dequantize-and-dot against a supplied image."
+  [op memory values fuel]
+  (let [[base length second-base second-length blocks] values
+        {:keys [block-bytes block-elements]} (get kernel-dequant-dot-formats op)
+        [packed-span element-span]
+        (kernel-dequant-dot-checks! op base length second-base second-length blocks)
+        zero (->word 0)
+        packed-slot (image-slot memory op base zero (bounded-word->int packed-span))
+        element-slot (image-slot memory op second-base zero
+                                 (bounded-word->int element-span))
+        image @(:bytes memory)
+        n (bounded-word->int blocks)
+        ;; One unit per ELEMENT, as the f32 dot product charges: the work is
+        ;; proportional to elements and a per-block charge would let a
+        ;; 16384-element fold run inside the fuel two additions are given.
+        _ (dotimes [_ (* n block-elements)] (charge! fuel {:operation op}))
+        add (fn [x y] (as-f32 (+ x y)))
+        zero-f32 (as-f32 0)
+        groups (quot block-elements 8)]
+    (loop [block 0, s0 zero-f32, s1 zero-f32, s2 zero-f32, s3 zero-f32]
+      (if (< block n)
+        (let [weights (dequantize-block op image (+ packed-slot (* block block-bytes)))
+              activations (+ element-slot (* block block-elements 4))
+              product (fn [i] (as-f32 (* (nth weights i)
+                                         (image-f32 image (+ activations (* 4 i))))))
+              [t0 t1 t2 t3]
+              (reduce
+               (fn [[a0 a1 a2 a3] group]
+                 (let [i (* 8 group)]
+                   ;; Lane k takes the lower half's element k and THEN the
+                   ;; upper half's -- `s += lower; s += upper`, per lane.
+                   [(add (add a0 (product i)) (product (+ i 4)))
+                    (add (add a1 (product (+ i 1))) (product (+ i 5)))
+                    (add (add a2 (product (+ i 2))) (product (+ i 6)))
+                    (add (add a3 (product (+ i 3))) (product (+ i 7)))]))
+               [s0 s1 s2 s3] (range groups))]
+          (recur (inc block) t0 t1 t2 t3))
+        (value/f32-to-i64-bits (add (add s0 s1) (add s2 s3)))))))
+;; dequant: end
 
 (defn- validated-memory
   "Admit an optional `:memory` image for `execute`."
@@ -4030,6 +4316,16 @@
            fuel)
           (trap! :kernel-memory-unavailable {:operation op}))
 
+        ;; dequant: the fused family answers with an image for the same
+        ;; reason, and is a separate arm because its count is BLOCKS.
+        (contains? kernel-dequant-dot-operations op)
+        (if-let [memory (:memory heap)]
+          (kernel-dequant-dot-call!
+           op memory
+           (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)
+           fuel)
+          (trap! :kernel-memory-unavailable {:operation op}))
+
         (contains? (into checked-memory-operations kernel-atomic-operations) op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
@@ -4460,6 +4756,11 @@
                                         kernel-uefi-operations
                                         rodata-address-operations
                                         kernel-dot-f32-operations
+                                        ;; dequant: every fused format, for
+                                        ;; the reason the f32 dot product is
+                                        ;; here -- it reads memory the
+                                        ;; constant oracle has not been given.
+                                        kernel-dequant-dot-operations
                                         ;; xsave: and the extended-state
                                         ;; enable, for the reason the `cpuid`
                                         ;; four are here. `(kernel-read-cr4)`
