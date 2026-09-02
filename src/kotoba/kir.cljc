@@ -3297,7 +3297,18 @@
                       kernel-in-u8 kernel-in-u32
                       kernel-read-msr kernel-write-msr
                       kernel-cpuid-eax kernel-cpuid-ebx
-                      kernel-cpuid-ecx kernel-cpuid-edx} op)
+                      kernel-cpuid-ecx kernel-cpuid-edx
+                      ;; boot: the UEFI firmware boundary refuses for the
+                      ;; strongest form of the reason `kernel-in-u8` does.
+                      ;; `kernel-system-table` is a pointer THE FIRMWARE
+                      ;; chose; `kernel-load-ptr` reads memory the firmware
+                      ;; owns; `kernel-uefi-call2` runs the firmware's own
+                      ;; code; `kernel-jump-to` does not return at all. There
+                      ;; is no value this interpreter could return for any of
+                      ;; the four that would be right, and for the last one
+                      ;; there is no value at all.
+                      kernel-system-table kernel-load-ptr
+                      kernel-uefi-call2 kernel-jump-to} op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -3572,7 +3583,13 @@
                              ;; not of the program, and must survive to run
                              ;; time no matter how constant its inputs look.
                              kernel-cpuid-eax kernel-cpuid-ebx
-                             kernel-cpuid-ecx kernel-cpuid-edx}
+                             kernel-cpuid-ecx kernel-cpuid-edx
+                             ;; boot: a module that reaches the UEFI firmware
+                             ;; boundary is kernel-native for the same reason
+                             ;; one that reads a port is -- there is nothing
+                             ;; here a constant folder may pre-answer.
+                             kernel-system-table kernel-load-ptr
+                             kernel-uefi-call2 kernel-jump-to}
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))

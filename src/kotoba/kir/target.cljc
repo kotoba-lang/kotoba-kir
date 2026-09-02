@@ -19,7 +19,20 @@
    :x86_64-windows-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :native :isa :x86_64 :os :windows :abi :kotoba-sysv-v1 :runtime :kotoba-windows-supervisor-v1}
    :x86_64-aiueos-uefi-v1 {:format :kotoba.target-profile/v1 :execution :firmware :isa :x86_64 :os :aiueos :abi :microsoft-x64 :runtime :none
                            :artifact :pe32+ :subsystem :efi-application :entry :efi_main
-                           :entry-contract :microsoft-x64-zero-arity-efi-status-v1
+                           ;; boot: v2 takes the two arguments UEFI actually
+                           ;; passes -- `(defn main [image-handle
+                           ;; system-table] ...)` -- and the entry shim parks
+                           ;; them in the context, where `kernel-boot-info`
+                           ;; and `kernel-system-table` read them. v1 is a
+                           ;; zero-arity entry whose shim DISCARDED rcx and
+                           ;; rdx, so a Kotoba UEFI application could not
+                           ;; reach the firmware at all. Both remain
+                           ;; packageable; the packager chooses by the entry's
+                           ;; arity, so `:entry-contract` here is the default
+                           ;; a new program gets rather than the only one.
+                           :entry-contract :microsoft-x64-two-arity-efi-status-v2
+                           :entry-contracts {0 :microsoft-x64-zero-arity-efi-status-v1
+                                             2 :microsoft-x64-two-arity-efi-status-v2}
                            :internal-abi :kotoba-sysv-context-r9-v2 :ambient-syscalls false}
    :x86_64-aiueos-kernel-v1 {:format :kotoba.target-profile/v1 :execution :kernel :isa :x86_64 :os :aiueos :abi :aiueos-kernel-v1 :runtime :none
                              :artifact :elf64 :link-artifact :elf64-relocatable
