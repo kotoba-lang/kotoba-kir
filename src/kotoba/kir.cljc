@@ -1440,6 +1440,15 @@
      kernel-rdtsc kernel-rdtscp kernel-swapgs})
 ;; sysops: end
 
+;; boot: the UEFI firmware boundary. `kernel-system-table` is a pointer THE
+;; FIRMWARE chose; `kernel-load-ptr` reads memory the firmware owns;
+;; `kernel-uefi-call2` runs the firmware's own code; `kernel-jump-to` does not
+;; return at all. There is no value this interpreter could return for any of
+;; the four that would be right, and for the last one there is no value.
+(def ^:private kernel-uefi-operations
+  '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to})
+;; boot: end
+
 (defn- word-above?
   "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
   [a b]
@@ -3446,7 +3455,16 @@
                    ;; had the problem. `rdtsc` is the machine's own cycle
                    ;; counter. `swapgs` moves a segment base this interpreter
                    ;; does not model.
-                   kernel-system-operations)
+                   ;; boot: `into` with three arguments takes the middle one
+                   ;; as a TRANSDUCER, so the two families are concatenated
+                   ;; rather than passed as two collections. Measured
+                   ;; 2026-09-02: the three-argument form reduces with a nil
+                   ;; `f` and every oracle-folded test in the suite dies with
+                   ;; a NullPointerException far from here.
+                   (concat kernel-system-operations
+                           ;; boot: the firmware boundary, for the strongest
+                           ;; form of the reason `kernel-in-u8` refuses.
+                           kernel-uefi-operations))
                   op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
@@ -3729,9 +3747,11 @@
         ;; `rdtsc` at compile time. The interpreter traps rather than
         ;; answering, so the failure would be loud -- but it would abort the
         ;; compile of a program that is perfectly valid.
+        ;; boot: the firmware boundary joins them for the same reason.
         kernel-operations (into kernel-operations
                                 (concat kernel-atomic-operations
-                                        kernel-system-operations))
+                                        kernel-system-operations
+                                        kernel-uefi-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
