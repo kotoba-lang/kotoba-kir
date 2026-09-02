@@ -130,6 +130,20 @@
     (testing (str form)
       (is (true? (kir/only-native-word-typed-features? (hir form)))))))
 
+(deftest scalar-f32-operations-are-admitted-by-the-native-word-gate
+  (doseq [form ['(f32-add (f32-from-bits 1065353216)
+                          (f32-from-bits 1073741824))
+                '(f32-sub 1 2) '(f32-mul 1 2) '(f32-div 1 2)
+                '(f32-min 1 2) '(f32-max 1 2)
+                '(f32-abs 1) '(f32-neg 1) '(f32-sqrt 1)
+                '(f32-to-bits (f32-from-bits 1))
+                '(f32-eq 1 2) '(f32-lt 1 2) '(f32-le 1 2)
+                '(f32-gt 1 2) '(f32-ge 1 2) '(f32-unordered 1 2)]]
+    (testing (str form)
+      (is (true? (kir/only-native-word-typed-features? (hir form))))
+      (is (true? (kir/only-native-word-typed-features?
+                  (hir (list 'let ['value form] 'value))))))))
+
 (deftest a-malformed-let-is-rejected-rather-than-walked-past
   ;; An odd binding count or a non-symbol binder cannot come from the frontend,
   ;; but this predicate also runs over KIR the verifier treats as hostile, so

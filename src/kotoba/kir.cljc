@@ -485,23 +485,27 @@
                                         [request-type result-type])
                              (native-provider-contract? cap-id request-type result-type))
                          (walk request)))
-                  ;; f64 scalar arithmetic on native (ADR-2608030300). Same
+                  ;; f32/f64 scalar arithmetic on native. Both use one i64
+                  ;; register word carrying the exact IEEE-754 bit pattern;
+                  ;; the backend moves only the low 32 bits through the f32
+                  ;; SIMD lane and zero-extends the result on return.
                   ;; reasoning as `i32-operations` above: no new value
-                  ;; representation, only i64 words -- here carrying an
-                  ;; IEEE-754 bit pattern. Both native ISAs emit these
-                  ;; directly. f32 is deliberately absent: neither backend
-                  ;; implements it.
-                  (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
+                  ;; representation. Both native ISAs emit these directly.
+                  (contains? '#{f32-add f32-sub f32-mul f32-div f32-min f32-max
+                                f32-abs f32-neg f32-sqrt f32-from-bits f32-to-bits
+                                f64-add f64-sub f64-mul f64-div f64-min f64-max
                                 f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
                              op)
                   (every? walk args)
-                  ;; f64 comparisons. These DO produce a genuine `:bool`-typed
+                  ;; Floating comparisons. These DO produce a genuine `:bool`-typed
                   ;; value, which the `true`/`false` comment above says only a
                   ;; literal could -- that was written before f64 reached
                   ;; native. It needs no new representation: the backends emit
                   ;; the same compare-and-set-flag pair the integer
                   ;; comparisons already do, into the same 0/1 word.
-                  (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
+                  (contains? '#{f32-eq f32-lt f32-le f32-gt f32-ge
+                                f32-unordered
+                                f64-eq f64-lt f64-le f64-gt f64-ge
                                 f64-unordered} op)
                   (and (= 2 (count args)) (every? walk args))
                   ;; Keyword OPERATIONS, which `native-word-field-types`'s
