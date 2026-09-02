@@ -1729,8 +1729,7 @@
 (def ^:private kernel-dot-f32-operations '#{kernel-dot-f32})
 ;; simd: end
 
-;; dequant: the fused dequantize-and-dot family (superproject
-;; ADR-2609021900).
+;; dequant: the fused dequantize-and-dot family (kotoba-gmir ADR 0023).
 ;;
 ;; The ORACLE lives here, and the machine is required to agree with it bit for
 ;; bit. Two things make that a checkable claim rather than a wish.

@@ -1,11 +1,11 @@
-# ADR 0241: the dequantization equations are the oracle
+# ADR 0256: the dequantization equations are the oracle
 
 Status: accepted. Date: 2026-09-02.
 
 ## Context
 
-kotoba-gmir ADR 0013 declares a fused dequantize-and-dot family, and
-kotoba-native ADR 0052 emits two arms for it that are required to agree bit for
+kotoba-gmir ADR 0023 declares a fused dequantize-and-dot family, and
+kotoba-native ADR 0066 emits two arms for it that are required to agree bit for
 bit. "Bit for bit with what" is this file's answer.
 
 ## Decision
