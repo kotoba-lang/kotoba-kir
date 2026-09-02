@@ -2,9 +2,37 @@
   "Canonical identity for typed Kotoba definitions (CI1).
 
   This is deliberately not a source, package, or Wasm hash.  It identifies a
-  closed pure definition's canonical typed KIR and direct definition identity
-  closure.  Authority is still supplied exclusively by package policy and the
-  capability runtime.
+  closed checked definition's canonical typed KIR and direct definition
+  identity closure.  Authority is still supplied exclusively by package policy
+  and the capability runtime.
+
+  ## Scope: every checked definition, effectful or not
+
+  The scope is `:closed-deterministic-checked-definition`
+  (`lang/code-identity.edn`, owner decision 2026-09-02).  An effectful
+  definition is in scope: its effect row is one of the sealed inputs, so a
+  definition requiring `#{:host/http}` has an identity, and it is a different
+  identity from the same KIR with an empty row.  The frozen vectors
+  `:effect-row-http` and `:effect-row-two` in `lang/code-identity-vectors.edn`
+  have said so since payload version 2; only the prose said \"pure\".  A CID is
+  still never authority — `lang/typed-eval.edn` requires a receipt to
+  *evaluate* an effectful definition by CID, and that receipt is the
+  capability runtime's, not this namespace's.
+
+  ## Effect-row vocabulary: keywords only (measured 2026-09-02)
+
+  `effect-row-problem` admits a set of keywords and nothing else.  The
+  compiler's `infer-effects` (kotoba-sema `frontend.cljc`, `direct-facts` /
+  `normalize-effect-ceiling`) produces rows whose members are the wire form
+  `[:cap/call <id>]` — vectors, not keywords — so a row taken straight from
+  the compiler is refused here with \"definition effect row members must be
+  keywords\" and gets no CID.  That gap is real and is recorded, not bridged:
+  admitting vectors, or translating ids back to registry keywords, decides
+  which vocabulary the sealed row canonically carries, and that decision
+  belongs to the contract (`lang/code-identity.edn`
+  `:definition-cid :effect-row-vocabulary`), not to a quiet widening of the
+  admitted domain.  The refusal is pinned by a test so the record cannot go
+  stale silently.
 
   ## What the identity seals
 
@@ -247,6 +275,10 @@
 ;; definition shape
 ;; ---------------------------------------------------------------------------
 
+;; Keyword members only. The compiler's inferred rows carry `[:cap/call id]`
+;; vectors (see the namespace docstring, "Effect-row vocabulary"); they are
+;; refused here on purpose until the contract names the canonical vocabulary.
+;; Widening this predicate is a contract change, not a bug fix.
 (defn- effect-row-problem [row]
   (cond
     (not (set? row))
@@ -255,7 +287,9 @@
     {:valid? false :message "definition effect row members must be keywords"}))
 
 (defn definition-error
-  "Checks the closed pure-definition shape before identity is calculated.
+  "Checks the closed checked-definition shape before identity is calculated.
+  Effectful definitions are in scope; their `:definition/effect-row` must be a
+  set of keywords (an empty set for a pure definition).
   `:definition/name` is deliberately ignored: it is an author-facing alias,
   never semantic identity."
   [definition]
@@ -334,7 +368,9 @@
   (mf/cidv1-dag-cbor (canonical-bytes definition)))
 
 (defn verify-locked-definitions
-  "Verifies resolved pure definitions against a package lock.
+  "Verifies resolved checked definitions — effectful ones included, since
+  their effect row is part of the identity being verified — against a package
+  lock.
 
   LOCK is a normal `:kotoba.lock/version 1` map whose dependency entries may
   contain `:dep/definition-cids`. RESOLVED is a sequence of
