@@ -3635,7 +3635,19 @@
                       ;; different value five instructions later once it has.
                       ;; There is no compile-time answer, and the one the
                       ;; caller BRANCHES on is "may I use AVX2".
-                      kernel-xgetbv}
+                      kernel-xgetbv
+                      ;; isr: `(kernel-isr-entry-address vector)` answers with
+                      ;; the address of a toolchain-generated interrupt entry
+                      ;; -- a location in a bootable image that the ELF
+                      ;; packager chooses AFTER every byte of this function
+                      ;; has been emitted. There is no address here at all:
+                      ;; this interpreter has no image, no text segment and no
+                      ;; entry table, so any number it returned would be
+                      ;; invented, and the caller writes that number into an
+                      ;; IDT gate descriptor. It refuses for the strongest
+                      ;; form of the `cpuid` reason -- an invented answer is
+                      ;; not merely wrong, it is the address the CPU jumps to.
+                      kernel-isr-entry-address}
                    ;; sysops: the barriers, the timestamp counter and the
                    ;; GS-base swap refuse for the `cpuid` reason, not the
                    ;; `kernel-load-u8` reason. A barrier orders memory
@@ -3941,7 +3953,17 @@
                              ;; effect. The interpreter traps rather than
                              ;; answering, so a module missing from this set
                              ;; does not compile at all.
-                             kernel-xgetbv})
+                             kernel-xgetbv
+                             ;; isr: and `kernel-isr-entry-address`, for the
+                             ;; same structural reason, at its sharpest. Its
+                             ;; argument is a literal vector number at every
+                             ;; real call site -- an IDT is built by naming
+                             ;; vectors -- so a constant-folder sees an
+                             ;; operation over one constant with nothing about
+                             ;; it to suggest an effect. The interpreter traps
+                             ;; rather than answering, so a module missing from
+                             ;; this set does not compile at all.
+                             kernel-isr-entry-address})
         ;; sysops: both new families mark a module kernel-native, for the same
         ;; reason the MSR pair and the `cpuid` four do. Without them the
         ;; constant oracle would try to fold an atomic read-modify-write or an
