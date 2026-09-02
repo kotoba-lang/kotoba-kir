@@ -1664,6 +1664,32 @@
 (def ^:private rodata-length-operations
   '#{bytes-literal-length})
 
+;; boot-scratch: two heads that name a place in the IMAGE ITSELF (kotoba-gmir
+;; ADR-0013).
+;;
+;; `(kernel-scratch-region)` answers with the base of the writable area the
+;; image packager reserves inside the image's own `.data`.
+;; `(kernel-function-address f)` answers with the address the layout pass gave
+;; `f`. Neither has an answer here for the same reason the literal heads do
+;; not -- there is no image -- but they do not share the literal heads' reason
+;; keyword, and that is deliberate rather than fastidious. A caller reading
+;; `:rodata-address-unavailable` about `(kernel-scratch-region)` would be told
+;; that read-only DATA is unavailable, which is the opposite of what was
+;; asked: the point of the region is that it is writable, and the point of a
+;; function's address is that it is code. The refusal has to name the right
+;; thing or it sends a reader looking at their literals.
+;;
+;; They mark a module kernel-native for the reason every other refusing head
+;; does: without that the constant oracle folds one, this trap fires, and a
+;; program that compiles perfectly well fails to compile.
+;;
+;; `kernel-function-address`'s argument is a NAME and is never evaluated here.
+;; That is not an optimisation -- the symbol denotes a function, not a
+;; variable, so evaluating it would report an unbound local for a program that
+;; is correct.
+(def ^:private image-address-operations
+  '#{kernel-scratch-region kernel-function-address})
+
 (defn- hex-pair-count
   "Bytes an even-length hex string denotes, or nil. Deliberately NOT a hex
   decoder: the byte VALUES belong to the backend that places them, and a
@@ -4426,6 +4452,14 @@
         (contains? rodata-address-operations op)
         (trap! :rodata-address-unavailable {:operation op})
 
+        ;; boot-scratch: a place in the image's own layout -- its `.data`
+        ;; reservation, or a function's label. There is no image here, and no
+        ;; layout pass has run. The argument of `kernel-function-address` is
+        ;; deliberately not evaluated: it is a function NAME, and evaluating
+        ;; it would report an unbound symbol for a correct program.
+        (contains? image-address-operations op)
+        (trap! :image-address-unavailable {:operation op})
+
         ;; boot-lit: the length, unlike the address, is a property of the
         ;; literal text and is answerable here.
         (contains? rodata-length-operations op)
@@ -4755,6 +4789,10 @@
                                         kernel-system-operations
                                         kernel-uefi-operations
                                         rodata-address-operations
+                                        ;; boot-scratch: and the two heads
+                                        ;; that name a place in the image
+                                        ;; itself, for the identical reason.
+                                        image-address-operations
                                         kernel-dot-f32-operations
                                         ;; dequant: every fused format, for
                                         ;; the reason the f32 dot product is

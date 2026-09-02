@@ -17,6 +17,8 @@
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
             [kotoba.kir-host-stack-trap-test]
+            ;; boot-scratch: the two heads that name a place in the image
+            [kotoba.kir-image-address-test]
             [kotoba.kir-kernel-memory-test]
             [kotoba.kir-kernel-privileged-test]
             [kotoba.kir-loop-helper-tail-position-test]
@@ -36,6 +38,7 @@
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
              'kotoba.kir-host-stack-trap-test
+             'kotoba.kir-image-address-test
              'kotoba.kir-kernel-memory-test
              'kotoba.kir-kernel-privileged-test
              'kotoba.kir-loop-helper-tail-position-test
