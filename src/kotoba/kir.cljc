@@ -1483,6 +1483,28 @@
   '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to})
 ;; boot: end
 
+;; simd: the f32 dot product (kotoba-gmir ADR 0010).
+;;
+;; It is not a member of `kernel-memory-profile`: that map is
+;; `op -> [ceiling width]` for operations that move ONE element at
+;; `base + index`, and this one names two regions, no index, and a count of
+;; elements to fold. Its own vars, its own check, its own evaluator.
+
+(def ^:private kernel-dot-f32-maximum
+  "The byte ceiling on EACH of the two regions. Mirrors
+  `kotoba.gmir/kernel-dot-f32-maximum`, which is the authority; the test
+  asserts the value rather than trusting this transcription."
+  65536)
+
+(def ^:private kernel-dot-f32-element-limit
+  "How many four-byte elements that ceiling admits. DERIVED, because a stale
+  copy of it would be a silent hole: it is what keeps `count * 4` from
+  wrapping a 64-bit multiply before it is compared against a length."
+  (quot kernel-dot-f32-maximum 4))
+
+(def ^:private kernel-dot-f32-operations '#{kernel-dot-f32})
+;; simd: end
+
 (def ^:private slice-item-limit
   "2^40 elements. Mirrors `kotoba.gmir/slice-item-limit` and
   `kotoba.mir/slice-item-limit`, and is an ADDRESS-SPACE bound rather than a
@@ -1889,6 +1911,145 @@
           (when (= old (word-truncate width operand))
             (write-word! (word-truncate width replacement)))
           old)))))
+
+
+;; simd: the f32 dot product's oracle.
+;;
+;; THE ACCUMULATION TREE IS THE CONTRACT, and it is written here because this
+;; is the definition every other implementation is checked against:
+;;
+;;   four lane accumulators, all +0.0
+;;   while eight or more elements remain:
+;;       lane k += a[i+k] * b[i+k]        for k = 0..3   (the "lower" half)
+;;       lane k += a[i+4+k] * b[i+4+k]    for k = 0..3   (the "upper" half)
+;;       i += 8
+;;   sum = (lane0 + lane1) + (lane2 + lane3)
+;;   for each remaining element: sum += a[i] * b[i]
+;;
+;; Eight at a time with four lanes, not four at a time, and lower before
+;; upper: that is the order a 256-bit register forces, and a scalar sequence
+;; can imitate a vector while a vector cannot imitate an arbitrary scalar
+;; order. Fixing the tree here is what lets an emitter's AVX2 arm and its
+;; scalar arm be bit-identical BY CONSTRUCTION rather than by measurement --
+;; each lane is an independent chain of the same additions in the same
+;; sequence, and interleaving between chains cannot change a result.
+;;
+;; The reference `dot_scalar` and `dot_avx2` in aiueos
+;; `os/aiueos/kernel/qwen35_infer.c` use DIFFERENT trees from each other (four
+;; at a time with `(s0+s1)+(s2+s3)`, versus eight at a time with a
+;; left-to-right `((l0+l1)+l2)+l3`). One had to be chosen. This is the
+;; vector one's LOOP with the scalar one's FINAL reduction, and the second
+;; half of that choice is not arbitrary either: `(s0+s1)+(s2+s3)` is two
+;; `haddps` on 128 bits, which is an instruction the AVX arm already has,
+;; while a left-to-right chain needs three lane extractions.
+;;
+;; Every operation is a single binary32 multiply or add. On the JVM the
+;; operands are `Float` and the arithmetic promotes to `double` before
+;; `as-f32` narrows it back, which is exact for ONE operation: 2*24+2 <= 53,
+;; so the double result rounds to the same float the hardware would produce.
+;; The same argument is what the f32 scalar family above already relies on.
+;;
+;; ONE BOUNDARY, stated rather than hidden. A NaN result is reported as the
+;; canonical quiet NaN, because `f32-to-i64-bits` collapses every NaN to one
+;; pattern on both hosts. x86 does not: an invalid operation yields the "real
+;; indefinite" QNaN with the sign bit SET, and a propagated NaN keeps its
+;; source payload. So oracle and machine agree that a NaN result is a NaN and
+;; do not agree on its payload. Any receipt built on this has to carry that.
+
+(defn- kernel-dot-f32-checks!
+  "The seven checks the emitter emits, in the emitter's order, so a program
+  that traps here traps on the machine and vice versa. All unsigned."
+  [op base length second-base second-length count]
+  (when (word-above? length kernel-dot-f32-maximum)
+    (trap! :kernel-memory-fault
+           {:operation op :check :length-above-profile-maximum
+            :length length :maximum kernel-dot-f32-maximum}))
+  (when (word-above? second-length kernel-dot-f32-maximum)
+    (trap! :kernel-memory-fault
+           {:operation op :check :second-length-above-profile-maximum
+            :length second-length :maximum kernel-dot-f32-maximum}))
+  (when (word-zero? base)
+    (trap! :kernel-memory-fault {:operation op :check :null-base}))
+  (when (word-zero? second-base)
+    (trap! :kernel-memory-fault {:operation op :check :null-second-base}))
+  ;; Before `count * 4` is formed, not after: the element limit is what makes
+  ;; that product safe to compute at all.
+  (when (word-above? count kernel-dot-f32-element-limit)
+    (trap! :kernel-memory-fault
+           {:operation op :check :count-above-element-limit
+            :count count :limit kernel-dot-f32-element-limit}))
+  (let [span (word-scale count 4)]
+    (when (word-above? span length)
+      (trap! :kernel-memory-fault
+             {:operation op :check :count-outside-window
+              :count count :length length}))
+    (when (word-above? span second-length)
+      (trap! :kernel-memory-fault
+             {:operation op :check :count-outside-second-window
+              :count count :length second-length}))
+    span))
+
+(defn- bounded-word->int
+  "A word already proved to be at most `kernel-dot-f32-maximum`, as a plain
+  host integer. Only ever called after the checks above, so the narrowing
+  cannot lose anything."
+  [word]
+  #?(:clj (long word) :cljs (js/Number word)))
+
+(defn- word-signed-i32
+  "The low 32 bits of WORD as a SIGNED i32 word.
+
+  `word-load` zero-extends, matching `mov r32`. `i64-bits-to-f32` refuses a
+  pattern outside signed-i32 range, so every negative float would throw
+  without this -- and the sign-extended form is also the canonical f32 word
+  the whole family travels in."
+  [word]
+  #?(:clj (long (unchecked-int (long word)))
+     :cljs (js/BigInt.asIntN 32 (i64/->bigint word))))
+
+(defn- kernel-dot-f32-call!
+  "Evaluate one f32 dot product against a supplied image."
+  [op memory values fuel]
+  (let [[base length second-base second-length count] values
+        span (kernel-dot-f32-checks! op base length second-base second-length count)
+        ;; Refusal to answer, never a machine verdict: the image the caller
+        ;; supplied may simply not cover a region the MACHINE would read
+        ;; happily. `image-slot` traps `:kernel-memory-outside-image` for
+        ;; exactly that, and it must not be readable as either verdict.
+        zero (->word 0)
+        bytes (bounded-word->int span)
+        a-slot (image-slot memory op base zero bytes)
+        b-slot (image-slot memory op second-base zero bytes)
+        image @(:bytes memory)
+        n (bounded-word->int count)
+        ;; One unit per element. The interpreter really does that much work,
+        ;; and a fold that charged one unit total would let a 16384-element
+        ;; dot product run inside the fuel a single addition is given.
+        _ (dotimes [_ n] (charge! fuel {:operation op}))
+        f32-at (fn [slot i]
+                 (value/i64-bits-to-f32
+                  (word-signed-i32 (word-load image (+ slot (* 4 i)) 4))))
+        product (fn [i] (as-f32 (* (f32-at a-slot i) (f32-at b-slot i))))
+        add (fn [x y] (as-f32 (+ x y)))
+        zero-f32 (as-f32 0)
+        blocks (quot n 8)]
+    (loop [block 0, s0 zero-f32, s1 zero-f32, s2 zero-f32, s3 zero-f32]
+      (if (< block blocks)
+        (let [i (* 8 block)]
+          ;; Lane k takes the lower half's element k and THEN the upper
+          ;; half's, which is what `s += lower; s += upper` does to lane k.
+          (recur (inc block)
+                 (add (add s0 (product (+ i 0))) (product (+ i 4)))
+                 (add (add s1 (product (+ i 1))) (product (+ i 5)))
+                 (add (add s2 (product (+ i 2))) (product (+ i 6)))
+                 (add (add s3 (product (+ i 3))) (product (+ i 7)))))
+        (value/f32-to-i64-bits
+         (loop [i (* 8 blocks)
+                sum (add (add s0 s1) (add s2 s3))]
+           (if (< i n)
+             (recur (inc i) (add sum (product i)))
+             sum)))))))
+;; simd: end
 
 (defn- validated-memory
   "Admit an optional `:memory` image for `execute`."
@@ -3583,6 +3744,19 @@
         ;; here a third time; `kernel-atomic-operations` joins from the sysops
         ;; branch, which answers with an image for the same reason the lock
         ;; pair does -- see `kernel-memory-call!`.
+        ;; simd: the f32 dot product answers with an image, for the reason the
+        ;; loads do: every byte it reads is a byte the caller wrote, and the
+        ;; arithmetic over them is determined rather than invented. It is a
+        ;; separate arm from the family below because its operands are two
+        ;; regions and a count rather than `base length index [value]`.
+        (contains? kernel-dot-f32-operations op)
+        (if-let [memory (:memory heap)]
+          (kernel-dot-f32-call!
+           op memory
+           (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)
+           fuel)
+          (trap! :kernel-memory-unavailable {:operation op}))
+
         (contains? (into checked-memory-operations kernel-atomic-operations) op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
@@ -3949,10 +4123,14 @@
         ;; answering, so the failure would be loud -- but it would abort the
         ;; compile of a program that is perfectly valid.
         ;; boot: the firmware boundary joins them for the same reason.
+        ;; simd: and the f32 dot product, which marks a module kernel-native
+        ;; for the same reason every other memory operation does -- it reads
+        ;; memory the constant oracle has not been given.
         kernel-operations (into kernel-operations
                                 (concat kernel-atomic-operations
                                         kernel-system-operations
-                                        kernel-uefi-operations))
+                                        kernel-uefi-operations
+                                        kernel-dot-f32-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
