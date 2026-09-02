@@ -94,11 +94,15 @@
 ;; needs no conversion at all -- there is no narrower-than-8-bytes packing
 ;; anywhere else in either file. `:f64` is deliberately NOT admitted here
 ;; even though it's part of ADR 0043 (the WASM Component Model analog this
-;; native slice is modeled on): `kotoba.compiler.core/compile-source*`'s
-;; own f32/f64 gate unconditionally rejects ANY `:f32`/`:f64` usage on
-;; native targets today (`ir/uses-f32?`/`ir/uses-f64?`), independent of
-;; records -- admitting f64 record fields here would silently also have to
-;; widen THAT orthogonal, pre-existing gate, which is exactly the "don't
+;; native slice is modeled on). When this comment was written the reason was
+;; that `kotoba.compiler.core/compile-source*`'s own gate rejected ANY
+;; `:f32`/`:f64` usage on native (`ir/uses-f32?`/`ir/uses-f64?`); both widths
+;; now reach native as OPERATIONS over i64 words, so the remaining reason is
+;; narrower and is about the FIELD SLOT, not the gate: a record field holding a
+;; float would have to declare which of the two widths its 8 bytes carry, and
+;; nothing in the slot machinery reads a field's declared type at runtime.
+;; Admitting one here would silently also have to widen that orthogonal,
+;; still-separate question, which is exactly the "don't
 ;; widen two dimensions in one step" pattern this compiler's own component
 ;; ADR chain (0058/0059) explicitly avoids. Native f64 record fields remain
 ;; a separately-gapped follow-up, not attempted by this increment.
@@ -115,10 +119,12 @@
 ;; and string variant payloads directly, bypassing this gate: all four cases
 ;; emit, including projecting the string back out and measuring it.
 ;;
-;; `:f64` stays out for the reason the previous comment gave and which has not
-;; changed: `kotoba.compiler.core`'s own f32/f64 gate rejects any f64 on native
-;; independently of records, so admitting it here would silently have to widen
-;; that orthogonal gate too. `:keyword` is admitted for the same reason `:string` is:
+;; `:f64` stays out for the reason the previous comment gave, restated: the
+;; question is not whether native can compute on floats -- it can, at both
+;; widths -- but that a float field would have to say which width its one word
+;; carries, and no field's declared type is read at runtime. That is a separate
+;; question from the operation gate and is not answered here.
+;; `:keyword` is admitted for the same reason `:string` is:
 ;; the backends now carry a keyword as the same one-word pair(offset,length)
 ;; handle, over its printed text, which is the representation
 ;; `kotoba.wasm.core` already chose for keyword literals. That admitted keyword
@@ -489,12 +495,62 @@
                   ;; reasoning as `i32-operations` above: no new value
                   ;; representation, only i64 words -- here carrying an
                   ;; IEEE-754 bit pattern. Both native ISAs emit these
-                  ;; directly. f32 is deliberately absent: neither backend
-                  ;; implements it.
+                  ;; directly.
                   (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
                                 f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
                              op)
                   (every? walk args)
+                  ;; f32: binary32 arithmetic on native
+                  ;; (ADR-kotoba-floating-point-on-native). Same admission
+                  ;; shape as the f64 line above and for the same reason: no
+                  ;; new value representation, only i64 words. The word an f32
+                  ;; occupies is its binary32 pattern SIGN-EXTENDED from bit 31,
+                  ;; which is what makes `f32-to-bits` an identity exactly the
+                  ;; way `f64-to-bits` is -- and what makes `f32-from-bits` the
+                  ;; one member of this family that is NOT an identity on
+                  ;; native: it sign-extends, canonicalising a zero-extended
+                  ;; u32 (what `kernel-load-u32` returns) into the same word a
+                  ;; signed i32 already is.
+                  ;;
+                  ;; `f32-min`/`f32-max` are deliberately NOT here, and this is
+                  ;; the one place the f32 family is narrower than the f64 one.
+                  ;; x86's MINSS/MAXSS return the SECOND operand when either
+                  ;; input is NaN; AArch64's FMIN/FMAX return the NaN; and this
+                  ;; interpreter -- the definition -- uses Math/min, which also
+                  ;; returns the NaN. So the f64 line above admits two
+                  ;; operations on which x86 already disagrees with both the
+                  ;; other ISA and the oracle. That is a pre-existing defect
+                  ;; (recorded, not repaired here, because repairing it moves
+                  ;; f64 goldens); this slice declines to duplicate it into a
+                  ;; second width.
+                  (contains? '#{f32-add f32-sub f32-mul f32-div
+                                f32-abs f32-neg f32-sqrt f32-from-bits f32-to-bits}
+                             op)
+                  (every? walk args)
+                  ;; Width conversions. Only the ones on which both ISAs and
+                  ;; this interpreter agree for EVERY input:
+                  ;;
+                  ;;   f32-to-f64-exact   widening, no rounding, no domain
+                  ;;   f64-to-f32-rounded round-to-nearest-even, overflow -> Inf
+                  ;;   i64-to-f{32,64}-rounded  every i64 converts; RNE
+                  ;;
+                  ;; The `-checked` conversions (`i64-to-f32-checked`,
+                  ;; `f32-to-i64-checked`, and their f64 twins) stay out: they
+                  ;; TRAP here on inexactness and neither backend emits that
+                  ;; check, so admitting them would let a program that must
+                  ;; trap compute an answer instead.
+                  ;;
+                  ;; The truncating float->int conversions
+                  ;; (`f32-to-i64-truncating`, `f64-to-i64-truncating`) stay out
+                  ;; for a sharper reason: on an out-of-domain input there are
+                  ;; three different answers. x86 CVTTSS2SI yields the integer
+                  ;; indefinite value (INT64_MIN), AArch64 FCVTZS saturates, and
+                  ;; this interpreter traps. Making them agree needs an emitted
+                  ;; domain check, which is a separate increment.
+                  (contains? '#{f32-to-f64-exact f64-to-f32-rounded
+                                i64-to-f32-rounded i64-to-f64-rounded}
+                             op)
+                  (and (= 1 (count args)) (walk (first args)))
                   ;; f64 comparisons. These DO produce a genuine `:bool`-typed
                   ;; value, which the `true`/`false` comment above says only a
                   ;; literal could -- that was written before f64 reached
@@ -503,6 +559,13 @@
                   ;; comparisons already do, into the same 0/1 word.
                   (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
                                 f64-unordered} op)
+                  (and (= 2 (count args)) (every? walk args))
+                  ;; f32 comparisons. Identical shape to the f64 line above:
+                  ;; a compare-and-setcc pair into the same 0/1 word, over the
+                  ;; single-precision compare (UCOMISS / FCMP s) instead of the
+                  ;; double one. Unordered handling is the f64 path's, unchanged.
+                  (contains? '#{f32-eq f32-lt f32-le f32-gt f32-ge
+                                f32-unordered} op)
                   (and (= 2 (count args)) (every? walk args))
                   ;; Keyword OPERATIONS, which `native-word-field-types`'s
                   ;; comment listed as needing a general substring and
@@ -1347,7 +1410,35 @@
     ;; gives them `[:gmir/kernel-try-lock-u32 4096]`. The width is the same
     ;; four bytes, so the `length - index >= 4` rule applies to them too.
     kernel-try-lock-u32 [4096 4]
-    kernel-unlock-u32   [4096 4]})
+    kernel-unlock-u32   [4096 4]
+    ;; sysops: the general atomics (kotoba-gmir ADR 0007). The lock pair fixes
+    ;; its comparand and replacement; these take the word from the guest, which
+    ;; is what a device descriptor ring needs. Same page ceiling, and the width
+    ;; is the operation's own -- four bytes or eight.
+    kernel-atomic-add-u32 [4096 4]
+    kernel-atomic-add-u64 [4096 8]
+    kernel-xchg-u32       [4096 4]
+    kernel-xchg-u64       [4096 8]
+    kernel-cmpxchg-u32    [4096 4]
+    kernel-cmpxchg-u64    [4096 8]})
+
+;; sysops: named once, so the profile, the evaluator's dispatch and `lower`'s
+;; kernel-native scan cannot drift apart.
+(def ^:private kernel-atomic-operations
+  '#{kernel-atomic-add-u32 kernel-atomic-add-u64
+     kernel-xchg-u32 kernel-xchg-u64
+     kernel-cmpxchg-u32 kernel-cmpxchg-u64})
+
+;; sysops: the x86 facilities that have no value an interpreter could invent.
+;; A barrier orders memory operations the oracle does not reorder in the first
+;; place, `rdtsc` is a property of the machine this is not running on, and
+;; `swapgs` moves state this interpreter does not model -- so they refuse for
+;; the same reason `kernel-cpuid-*` does, and appear in the refusal set and in
+;; `lower`'s kernel-native scan below.
+(def ^:private kernel-system-operations
+  '#{kernel-fence-load kernel-fence-store kernel-fence-full
+     kernel-rdtsc kernel-rdtscp kernel-swapgs})
+;; sysops: end
 
 (defn- word-above?
   "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
@@ -1386,6 +1477,42 @@
 (defn- ->word [n]
   #?(:clj (long n) :cljs (i64/->bigint n)))
 
+;; sysops: 256^n, built by repeated multiplication rather than a shift.
+;;
+;; `word-byte` above takes a BIT shift and, on cljs, divides by
+;; `(js/BigInt (bit-shift-left 1 shift))`. That is correct for every shift it
+;; is given today (0, 8, 16, 24) and WRONG for 32 and above, because cljs
+;; `bit-shift-left` coerces to int32 -- the exact hazard
+;; `kotoba.kir.cljs-i64/ashr`'s own docstring records having committed once.
+;; Eight-byte access needs shifts up to 56, so it gets its own helper rather
+;; than a fourth caller of the one with the trap in it.
+(defn- word-pow256 [n]
+  #?(:clj (bit-shift-left 1 (* 8 n))
+     :cljs (loop [k n acc (js/BigInt 1)]
+             (if (pos? k) (recur (dec k) (* acc (js/BigInt 256))) acc))))
+
+(defn- word-times [a b]
+  #?(:clj (unchecked-multiply (long a) (long b))
+     :cljs (i64/wrap-i64 (* (i64/->bigint a) (i64/->bigint b)))))
+
+(defn- word-byte-at
+  "The `n`th byte of `value`, counting from the least significant."
+  [value n]
+  #?(:clj (int (bit-and (unsigned-bit-shift-right (long value) (* 8 n)) 255))
+     :cljs (js/Number (js/BigInt.asUintN
+                       8 (/ (js/BigInt.asUintN 64 (i64/->bigint value))
+                            (word-pow256 n))))))
+
+(defn- word-truncate
+  "`value` narrowed to `width` bytes and zero-extended back to a machine word
+  -- what a 32-bit register write leaves in the 64-bit register."
+  [width value]
+  (if (= width 8)
+    (->word value)
+    #?(:clj (bit-and (long value) (dec (bit-shift-left 1 (* 8 width))))
+       :cljs (i64/wrap-i64 (js/BigInt.asUintN (* 8 width)
+                                              (i64/->bigint value))))))
+
 (defn- kernel-window-check!
   "The three checks `emit-kernel-load-u8` and its siblings emit, in their
   order, so a program that traps here traps on the machine and vice versa."
@@ -1401,7 +1528,10 @@
         (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                      :index index :length length}))
       ;; Two checks, in the order `kotoba.native.machine-ir` lowers them:
-      ;; `index < length`, and then `length - index >= 4`. Neither can wrap.
+      ;; `index < length`, and then `length - index >= width`. Neither can wrap.
+      ;; The tail was written as the literal 4 while four bytes was the only
+      ;; multi-byte width; it is the operation's own width now that eight-byte
+      ;; atomics exist, and is still 4 for every operation that had it before.
       ;;
       ;; The first version of this read only kotoba-native's `emit-kernel-load-u32`,
       ;; which computes `index + 4` with `lea` and compares THAT -- a form where
@@ -1418,9 +1548,19 @@
         (when (word-at-least? index length)
           (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                        :index index :length length}))
-        (when (word-above? 4 (word-minus length index))
-          (trap! :kernel-memory-fault {:operation op :check :four-byte-access-outside-window
-                                       :index index :length length}))))))
+        (when (word-above? width (word-minus length index))
+          ;; sysops: the four-byte spelling is kept verbatim for width 4 --
+          ;; it is a pinned reason literal, and renaming it would move every
+          ;; assertion that names it while changing nothing about the check.
+          ;; Eight-byte access gets its own name rather than reporting a
+          ;; violation of a bound it does not have.
+          (trap! :kernel-memory-fault
+                 {:operation op
+                  :check (if (= width 8)
+                           :eight-byte-access-outside-window
+                           :four-byte-access-outside-window)
+                  :width width
+                  :index index :length length}))))))
 
 (defn- image-slot
   "Index of `pointer + index` within the supplied image, or a refusal to
@@ -1457,11 +1597,33 @@
           (trap! :kernel-memory-fault {:operation op :check :subwindow-outside-window
                                        :sublength sublen :remaining remaining})))
       (word-plus base offset))
-    (let [[base length index value] values
+    ;; sysops: `operand` is the fourth argument under every spelling -- the
+    ;; stored word for the u8/u32 stores, the addend for `atomic-add`, the
+    ;; replacement for `xchg`, and the COMPARAND for `cmpxchg`, whose fifth
+    ;; argument `replacement` is the word it writes on a match.
+    (let [[base length index operand replacement] values
           [_ width] (get kernel-memory-profile op)
           _ (kernel-window-check! op base length index)
           slot (image-slot memory op base index width)
-          bytes (:bytes memory)]
+          bytes (:bytes memory)
+          ;; sysops: read and write `width` little-endian bytes at `slot`.
+          ;; Defined here rather than at the top level because they are only
+          ;; meaningful once the window check and the image slot have passed.
+          read-word (fn []
+                      (let [image @bytes]
+                        (reduce (fn [acc n]
+                                  (word-plus acc
+                                             (word-times
+                                              (->word (nth image (+ slot n)))
+                                              (word-pow256 n))))
+                                (->word 0) (range width))))
+          write-word! (fn [word]
+                        (vswap! bytes
+                                (fn [image]
+                                  (reduce (fn [image n]
+                                            (assoc image (+ slot n)
+                                                   (word-byte-at word n)))
+                                          image (range width)))))]
       (case op
         (kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k)
         (->word (nth @bytes slot))
@@ -1474,17 +1636,17 @@
                      (* 16777216 (nth image (+ slot 3))))))
 
         (kernel-store-u8 kernel-store-u8-4k)
-        (do (vswap! bytes assoc slot (word-byte value 0))
-            ;; RAX still holds `value` after `mov [rdx+rdi],al`.
-            value)
+        (do (vswap! bytes assoc slot (word-byte operand 0))
+            ;; RAX still holds the stored word after `mov [rdx+rdi],al`.
+            operand)
 
         kernel-store-u32
         (do (vswap! bytes assoc
-                    slot (word-byte value 0)
-                    (+ slot 1) (word-byte value 8)
-                    (+ slot 2) (word-byte value 16)
-                    (+ slot 3) (word-byte value 24))
-            value)
+                    slot (word-byte operand 0)
+                    (+ slot 1) (word-byte operand 8)
+                    (+ slot 2) (word-byte operand 16)
+                    (+ slot 3) (word-byte operand 24))
+            operand)
 
         ;; `lock cmpxchg` with the operation's own comparand and replacement:
         ;; 0 -> 1 to take, 1 -> 0 to release. Returns 1 when the swap happened.
@@ -1500,7 +1662,41 @@
                         slot (bit-and desired 255)
                         (+ slot 1) 0 (+ slot 2) 0 (+ slot 3) 0)
                 (->word 1))
-            (->word 0)))))))
+            (->word 0)))
+
+        ;; sysops: the general atomics. Each is a single read-modify-write over
+        ;; bytes the caller supplied, with the operand the caller supplied, in
+        ;; an interpreter with one thread -- determined, not invented, which is
+        ;; the same argument the lock pair's epitaph above makes.
+        ;;
+        ;; The same boundary applies and any receipt built on this has to carry
+        ;; it: this models the UNCONTENDED case and nothing else. Getting the
+        ;; expected old word back shows the object performs the exchange it
+        ;; claims to. It shows nothing whatsoever about two callers, because
+        ;; there is only ever one here.
+        ;;
+        ;; Every one of them ANSWERS WITH THE OLD WORD, matching what the
+        ;; machine leaves in the destination register: `xadd` and `xchg` put
+        ;; the previous memory contents in the source register, and `cmpxchg`
+        ;; leaves it in EAX/RAX whether or not the swap happened.
+        (kernel-atomic-add-u32 kernel-atomic-add-u64)
+        (let [old (read-word)]
+          (write-word! (word-truncate width (word-plus old operand)))
+          old)
+
+        (kernel-xchg-u32 kernel-xchg-u64)
+        (let [old (read-word)]
+          (write-word! (word-truncate width operand))
+          old)
+
+        ;; The comparand is the guest's, which is the entire difference from
+        ;; the lock pair. It is compared at the operation's own width, because
+        ;; `lock cmpxchg` on a doubleword compares EAX and not RAX.
+        (kernel-cmpxchg-u32 kernel-cmpxchg-u64)
+        (let [old (read-word)]
+          (when (= old (word-truncate width operand))
+            (write-word! (word-truncate width replacement)))
+          old)))))
 
 (defn- validated-memory
   "Admit an optional `:memory` image for `execute`."
@@ -3191,10 +3387,15 @@
         ;; the lock and gets 1 has shown that the object takes a free lock. It
         ;; has not shown anything whatsoever about two callers, because there
         ;; is only ever one here.
-        (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
-                      kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32
-                      kernel-try-lock-u32 kernel-unlock-u32} op)
+        (contains? (into '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
+                            kernel-store-u8 kernel-store-u8-4k kernel-subregion
+                            kernel-load-u32 kernel-store-u32
+                            kernel-try-lock-u32 kernel-unlock-u32}
+                         ;; sysops: the general atomics answer with an image
+                         ;; for exactly the reason the lock pair does -- see
+                         ;; `kernel-memory-call!`.
+                         kernel-atomic-operations)
+                   op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
            op memory
@@ -3219,7 +3420,7 @@
         ;; run on. Answering would not merely invent a value: the six aiueos
         ;; sites BRANCH on it, so an invented answer becomes "this CPU supports
         ;; NX" decided by a compiler that has never seen the CPU. It refuses.
-        (contains? '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
+        (contains? (into '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
                       kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-read-cs kernel-page-fault-handler-address
                       kernel-rt-timer-handler-address
@@ -3246,7 +3447,19 @@
                       ;; different value five instructions later once it has.
                       ;; There is no compile-time answer, and the one the
                       ;; caller BRANCHES on is "may I use AVX2".
-                      kernel-xgetbv} op)
+                      kernel-xgetbv}
+                   ;; sysops: the barriers, the timestamp counter and the
+                   ;; GS-base swap refuse for the `cpuid` reason, not the
+                   ;; `kernel-load-u8` reason. A barrier orders memory
+                   ;; operations against a machine this interpreter is not
+                   ;; running on -- and there is nothing to order here, since
+                   ;; the oracle executes one operation at a time, so an answer
+                   ;; would be "the barrier worked" from something that never
+                   ;; had the problem. `rdtsc` is the machine's own cycle
+                   ;; counter. `swapgs` moves a segment base this interpreter
+                   ;; does not model.
+                   kernel-system-operations)
+                  op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -3532,6 +3745,15 @@
                              ;; answering, so a module missing from this set
                              ;; does not compile at all.
                              kernel-xgetbv}
+        ;; sysops: both new families mark a module kernel-native, for the same
+        ;; reason the MSR pair and the `cpuid` four do. Without them the
+        ;; constant oracle would try to fold an atomic read-modify-write or an
+        ;; `rdtsc` at compile time. The interpreter traps rather than
+        ;; answering, so the failure would be loud -- but it would abort the
+        ;; compile of a program that is perfectly valid.
+        kernel-operations (into kernel-operations
+                                (concat kernel-atomic-operations
+                                        kernel-system-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))

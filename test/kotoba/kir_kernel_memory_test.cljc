@@ -6,7 +6,8 @@
   the backends admit something surprising this suite pins the surprise --
   see `four-byte-index-wraps-below-the-buffer`."
   (:require [clojure.test :refer [deftest is]]
-            [kotoba.kir :as kir]))
+            [kotoba.kir :as kir]
+            [kotoba.test-hir :as test-hir]))
 
 (defn- module [params body]
   {:format :kotoba.kir/v4
@@ -237,3 +238,147 @@
   (let [data (trapped #(run try-lock [4096 4 0] {}))]
     (is (= :kernel-memory-unavailable (:trap data)))
     (is (= 'kernel-try-lock-u32 (:operation data)))))
+
+;; ---------------------------------------------------------------------------
+;; sysops: the general atomic family, and the system operations that refuse.
+;; ---------------------------------------------------------------------------
+
+(def ^:private add-u32 (module '[base length index delta]
+                               '(kernel-atomic-add-u32 base length index delta)))
+(def ^:private add-u64 (module '[base length index delta]
+                               '(kernel-atomic-add-u64 base length index delta)))
+(def ^:private xchg-u32 (module '[base length index new]
+                                '(kernel-xchg-u32 base length index new)))
+(def ^:private xchg-u64 (module '[base length index new]
+                                '(kernel-xchg-u64 base length index new)))
+(def ^:private cmpxchg-u32 (module '[base length index expect desire]
+                                   '(kernel-cmpxchg-u32 base length index expect desire)))
+(def ^:private cmpxchg-u64 (module '[base length index expect desire]
+                                   '(kernel-cmpxchg-u64 base length index expect desire)))
+
+(deftest atomic-add-answers-with-the-old-word-and-advances-memory
+  ;; `lock xadd` puts the PREVIOUS memory contents in the source register.
+  (let [mem (image 4096 [7 0 0 0])]
+    (is (= 7 (w (run add-u32 [4096 4 0 5] {:memory mem}))))
+    (is (= [12 0 0 0] @(:bytes mem))))
+  (let [mem (image 4096 [0xfe 0xff 0xff 0xff])]
+    ;; 0xfffffffe + 3 wraps at 32 bits, exactly as `xadd r/m32` does.
+    (is (= 4294967294 (w (run add-u32 [4096 4 0 3] {:memory mem}))))
+    (is (= [1 0 0 0] @(:bytes mem))))
+  (let [mem (image 4096 [1 0 0 0 0 0 0 0])]
+    (is (= 1 (w (run add-u64 [4096 8 0 255] {:memory mem}))))
+    (is (= [0 1 0 0 0 0 0 0] @(:bytes mem)))))
+
+(deftest exchange-answers-with-the-old-word-and-installs-the-new-one
+  (let [mem (image 4096 [1 2 3 4])]
+    (is (= 0x04030201 (w (run xchg-u32 [4096 4 0 0xaabbccdd] {:memory mem}))))
+    (is (= [0xdd 0xcc 0xbb 0xaa] @(:bytes mem))))
+  ;; The eight-byte operand is written 0x0001020304050607 and not
+  ;; 0x0102030405060708, and the difference is not cosmetic: on ClojureScript
+  ;; a hexadecimal literal is a plain JS number, and 0x0102030405060708 is
+  ;; 72,623,859,790,382,856 -- above 2^53, so it is ALREADY rounded to
+  ;; 0x0102030405060700 before it reaches the interpreter. The first version of
+  ;; this assertion used it and failed on nbb with a zero in byte 0 while
+  ;; passing on the JVM, which looked exactly like an encoder bug in the new
+  ;; eight-byte helpers and was not.
+  ;;
+  ;; The top byte is covered by the -2 case below rather than by a bigger
+  ;; literal, because there is no eight-byte literal with a non-zero top byte
+  ;; that a JS number can hold exactly.
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])]
+    (is (= 0 (w (run xchg-u64 [4096 8 0 0x0001020304050607] {:memory mem}))))
+    (is (= [7 6 5 4 3 2 1 0] @(:bytes mem))))
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])]
+    (is (= 0 (w (run xchg-u64 [4096 8 0 -2] {:memory mem}))))
+    (is (= [0xfe 0xff 0xff 0xff 0xff 0xff 0xff 0xff] @(:bytes mem))
+        "the top byte of a negative word survives the eight-byte write")))
+
+(deftest compare-exchange-takes-the-comparand-from-the-guest
+  ;; The whole difference from `kernel-try-lock-u32`, which fixes 0 -> 1.
+  (let [mem (image 4096 [9 0 0 0])]
+    (is (= 9 (w (run cmpxchg-u32 [4096 4 0 9 42] {:memory mem})))
+        "the observed word comes back whether or not the swap happened")
+    (is (= [42 0 0 0] @(:bytes mem)) "a matching comparand swaps"))
+  (let [mem (image 4096 [9 0 0 0])]
+    (is (= 9 (w (run cmpxchg-u32 [4096 4 0 8 42] {:memory mem}))))
+    (is (= [9 0 0 0] @(:bytes mem)) "a mismatching comparand leaves memory alone"))
+  (let [mem (image 4096 [5 0 0 0 0 0 0 0])]
+    (is (= 5 (w (run cmpxchg-u64 [4096 8 0 5 6] {:memory mem}))))
+    (is (= [6 0 0 0 0 0 0 0] @(:bytes mem)))))
+
+(deftest compare-exchange-compares-at-the-operation-width
+  ;; `lock cmpxchg` on a doubleword compares EAX, not RAX. A comparand whose
+  ;; high half differs must still match.
+  (let [mem (image 4096 [9 0 0 0])]
+    (is (= 9 (w (run cmpxchg-u32 [4096 4 0 (+ 9 (* 65536 65536)) 42]
+                     {:memory mem}))))
+    (is (= [42 0 0 0] @(:bytes mem)))))
+
+(deftest eight-byte-atomics-need-eight-bytes-left-in-the-window
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])
+        data (trapped #(run add-u64 [4096 8 1 1] {:memory mem}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :eight-byte-access-outside-window (:check data)))
+    (is (= 8 (:width data)))
+    (is (= [0 0 0 0 0 0 0 0] @(:bytes mem)) "a trapping access writes nothing"))
+  ;; and the four-byte reason literal is unchanged for four-byte operations
+  (let [mem (image 4096 [0 0 0 0])
+        data (trapped #(run add-u32 [4096 4 1 1] {:memory mem}))]
+    (is (= :four-byte-access-outside-window (:check data)))
+    (is (= 4 (:width data)))))
+
+(deftest the-general-atomics-share-the-lock-pairs-page-ceiling
+  (doseq [[m args] [[add-u32 [4096 4097 0 1]]
+                    [add-u64 [4096 4097 0 1]]
+                    [xchg-u32 [4096 4097 0 1]]
+                    [xchg-u64 [4096 4097 0 1]]
+                    [cmpxchg-u32 [4096 4097 0 1 2]]
+                    [cmpxchg-u64 [4096 4097 0 1 2]]]]
+    (let [data (trapped #(run m args {:memory (image 4096 (vec (repeat 16 0)))}))]
+      (is (= :kernel-memory-fault (:trap data)))
+      (is (= :length-above-profile-maximum (:check data)))
+      (is (= 4096 (:maximum data))))))
+
+(deftest without-an-image-the-general-atomics-refuse
+  (doseq [[m args op] [[add-u32 [4096 4 0 1] 'kernel-atomic-add-u32]
+                       [add-u64 [4096 8 0 1] 'kernel-atomic-add-u64]
+                       [xchg-u32 [4096 4 0 1] 'kernel-xchg-u32]
+                       [xchg-u64 [4096 8 0 1] 'kernel-xchg-u64]
+                       [cmpxchg-u32 [4096 4 0 1 2] 'kernel-cmpxchg-u32]
+                       [cmpxchg-u64 [4096 8 0 1 2] 'kernel-cmpxchg-u64]]]
+    (let [data (trapped #(run m args {}))]
+      (is (= :kernel-memory-unavailable (:trap data)))
+      (is (= op (:operation data))))))
+
+(deftest the-system-operations-refuse-because-there-is-nothing-to-answer
+  ;; A barrier, the timestamp counter and the GS-base swap refuse for the
+  ;; `kernel-cpuid-*` reason, not the `kernel-load-u8` reason: their value (or
+  ;; their effect) is a property of the machine this interpreter is not running
+  ;; on. Supplying an image changes nothing, which is what the second half
+  ;; asserts -- an image says what BYTES are, and none of these read bytes.
+  (doseq [op '[kernel-fence-load kernel-fence-store kernel-fence-full
+               kernel-rdtsc kernel-rdtscp kernel-swapgs]]
+    (let [m (module '[] (list op))]
+      (doseq [opts [{} {:memory (image 4096 [0 0 0 0])}]]
+        (let [data (trapped #(run m [] opts))]
+          (is (= :kernel-privileged-unavailable (:trap data)) op)
+          (is (= op (:operation data)) op))))))
+
+(deftest the-new-families-suppress-constant-oracling
+  ;; Both mark a module kernel-native, for the reason the MSR pair and the
+  ;; `cpuid` four do: without it `lower` would try to fold the operation at
+  ;; compile time and abort the compile of a valid program.
+  (doseq [body ['(kernel-rdtsc)
+                '(kernel-fence-full)
+                '(kernel-swapgs)
+                '(kernel-atomic-add-u32 4096 4 0 1)
+                '(kernel-xchg-u64 4096 8 0 1)
+                '(kernel-cmpxchg-u32 4096 4 0 1 2)]]
+    (let [lowered (kir/lower
+                   (test-hir/module
+                    {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                     :result :i64
+                     :functions [{:name 'main :params [] :result :i64
+                                  :body body}]}))]
+      (is (nil? (:oracle-value lowered)) body)
+      (is (= [] (:blocks lowered)) body))))
