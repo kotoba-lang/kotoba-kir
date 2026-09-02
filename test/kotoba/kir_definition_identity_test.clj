@@ -51,3 +51,47 @@
     (is (thrown? clojure.lang.ExceptionInfo (identity/normalize 1.5)))
     (is (thrown? clojure.lang.ExceptionInfo
                  (identity/normalize 9007199254740993)))))
+
+;; ---------------------------------------------------------------------------
+;; scope: checked definitions, effectful included (owner decision 2026-09-02)
+;; ---------------------------------------------------------------------------
+
+(def ^:private frozen-pure-const-cid
+  "lang/code-identity-vectors.edn :pure-const (kotoba-lang), payload version 2."
+  "bafyreiarrzdga4uwvk6miw6rdndih4z56xgtd4qz25tb3gxld7toolyaiu")
+
+(def ^:private frozen-effect-row-http-cid
+  "lang/code-identity-vectors.edn :effect-row-http (kotoba-lang), payload version 2."
+  "bafyreigqeocmakhluccfdbaylvuypgapm3fzfui4ras6hniuzzgkxrxgbm")
+
+(def ^:private vector-definition
+  "The kotoba-lang frozen-vector base: the op-test's `base`, with :result."
+  {:definition/profile-version 4
+   :definition/desugar-contract-version 1
+   :definition/kir {:op :const :value 1}
+   :definition/effect-row #{}
+   :definition/interface {:arity 0 :result :i64}
+   :definition/dependencies []})
+
+(deftest effectful-definitions-are-in-scope-and-the-row-is-sealed
+  (let [pure vector-definition
+        effectful (assoc vector-definition :definition/effect-row #{:host/http})]
+    (testing "(a) a definition requiring http authority has an identity, and it
+              is the frozen one -- the scope was never pure-only in the bytes"
+      (is (nil? (identity/definition-error effectful)))
+      (is (= frozen-effect-row-http-cid (identity/definition-cid effectful))))
+    (testing "(b) the same KIR with an empty row is a different definition"
+      (is (= frozen-pure-const-cid (identity/definition-cid pure)))
+      (is (not= (identity/definition-cid pure) (identity/definition-cid effectful))))))
+
+(deftest compiler-wire-effect-rows-are-not-yet-hashable
+  (testing "(c) measured 2026-09-02: kotoba-sema's infer-effects emits
+            [:cap/call id] vectors, and this namespace admits keyword members
+            only. The refusal is pinned by its message so that bridging the
+            vocabulary must also revisit this record and the contract entry
+            lang/code-identity.edn :definition-cid :effect-row-vocabulary."
+    (let [wire-row (assoc vector-definition :definition/effect-row #{[:cap/call 8]})
+          error (identity/definition-error wire-row)]
+      (is (= "definition effect row members must be keywords" (:message error)))
+      (is (thrown? clojure.lang.ExceptionInfo (identity/definition-cid wire-row))
+          "no CID is minted over a row whose vocabulary the contract has not named"))))
