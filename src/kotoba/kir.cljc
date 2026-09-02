@@ -631,6 +631,36 @@
                   ;; slice does not already have.
                   (= op 'bool-not)
                   (and (= 1 (count args)) (walk (first args)))
+                  ;; `bit-or` and `bit-not`, for `bool-not`'s reason and by the
+                  ;; same measurement. Both are i64 word operations that the
+                  ;; frontend, this file's evaluator and both native backends
+                  ;; already emit -- `bit-or` since ADR-2607254600 D2 -- and
+                  ;; neither introduces a value representation the one-word
+                  ;; slice does not have. They are in `non-string-typed-ops`
+                  ;; because they were ADDED to the arithmetic surface after
+                  ;; that set was written, and nothing gave them a case here.
+                  ;;
+                  ;; The consequence was invisible until something needed both
+                  ;; halves at once: this gate only runs on `:kotoba.hir/v3`,
+                  ;; and a module reaches v3 only by using a typed value. So an
+                  ;; object could use `bit-or` freely (aiueos
+                  ;; `qwen35-gguf-kv-scan.kotoba` does, 60 times) and an object
+                  ;; could use f32 freely, and the FIRST object to use both was
+                  ;; refused with "typed values currently require the
+                  ;; kotoba-script web target ..." -- a message about typed
+                  ;; values, naming neither operation. Measured 2026-09-02
+                  ;; against amu 25907a65 while porting `fp16_to_f32`, whose
+                  ;; three `|`s are the whole of what it does.
+                  ;;
+                  ;; The shift families (`i64-shift-left`, `i64-shift-right`,
+                  ;; `u64-shift-right`, and the i32 set) sit in the same set
+                  ;; with the same absence and are NOT widened here. They carry
+                  ;; an operand restriction the other two do not -- the count
+                  ;; must be an integer literal in range, which is what lets a
+                  ;; backend lower them onto CL without a mask -- and this
+                  ;; increment measured `bit-or` and `bit-not`, not them.
+                  (contains? '#{bit-or bit-not} op)
+                  (every? walk args)
                   (= op 'option-some)
                   (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-none)
