@@ -540,3 +540,37 @@
                                   :body body}]}))]
       (is (nil? (:oracle-value lowered)) body)
       (is (= [] (:blocks lowered)) body))))
+
+(deftest the-interrupt-entry-address-refuses-because-there-is-no-image
+  ;; `(kernel-isr-entry-address vector)` answers with a location inside a
+  ;; bootable image -- one the ELF packager chooses after every byte of the
+  ;; function has been emitted. This interpreter has no image, no text segment
+  ;; and no entry table, so there is nothing to read and any number would be
+  ;; invented.
+  ;;
+  ;; It refuses for the strongest form of the `cpuid` reason rather than the
+  ;; `kernel-load-u8` reason: an invented `cpuid` answer is a wrong branch, and
+  ;; an invented answer HERE is the address the CPU jumps to on an interrupt.
+  ;; Supplying an image changes nothing, which is what the second option
+  ;; asserts: an image says what bytes are, and this reads no bytes.
+  (doseq [vector [0 3 14 63]]
+    (let [m (module '[] (list 'kernel-isr-entry-address vector))]
+      (doseq [opts [{} {:memory (image 4096 [0 0 0 0])}]]
+        (let [data (trapped #(run m [] opts))]
+          (is (= :kernel-privileged-unavailable (:trap data)) vector)
+          (is (= 'kernel-isr-entry-address (:operation data)) vector))))))
+
+(deftest the-interrupt-entry-address-suppresses-constant-oracling
+  ;; Its argument is a literal at every real call site -- an IDT is built by
+  ;; naming vectors -- so a constant-folder sees an operation over one constant
+  ;; with nothing about it to suggest an effect. Without this the trap above
+  ;; would abort the compile of a program that is perfectly valid.
+  (let [body '(kernel-isr-entry-address 3)
+        lowered (kir/lower
+                 (test-hir/module
+                  {:format :kotoba.hir/v2 :entry 'main :exports ['main]
+                   :result :i64
+                   :functions [{:name 'main :params [] :result :i64
+                                :body body}]}))]
+    (is (nil? (:oracle-value lowered)))
+    (is (= [] (:blocks lowered)))))
