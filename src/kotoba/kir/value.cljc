@@ -1797,11 +1797,35 @@
                       {:phase :value :ref root :value-type value-type})))
     value-type))
 
+(defn- compare-i64
+  "Signed numeric order over an i64 VALUE, on both runtimes.
+
+  `compare` cannot do this on `:cljs`. An i64 that came from `.kotoba` source
+  is a JS bigint, which is neither `number?` nor `IComparable`, so
+  `cljs.core/compare` reaches its final arm and throws `Cannot compare 2 to 1`.
+  Every ordered i64 collection went through here, so under nbb none of them
+  worked: `[:set :i64]` with two items, and -- once an integer could be a map
+  key at all -- `[:map :i64 V]` with two entries. The second one did not look
+  like this bug from outside. `amu compile --target wasm32` evaluates the
+  oracle through `lower`, so the exception surfaced as a generic `internal
+  compiler error` (exit 70) that read as a missing wasm lowering; the entry
+  counts (one entry fine, two not) and the key types (only `:i64`) are what
+  identify it.
+
+  `<` and `>` are JS operators and do work on bigint -- `kotoba.kir.cljs-i64`
+  already relies on that -- so the order is spelled with those. Mixed bigint
+  and number operands compare numerically in JavaScript, which is what a
+  literal synthesized by the compiler (a plain number) meeting one read from
+  source (a bigint) requires."
+  [left right]
+  #?(:clj (compare left right)
+     :cljs (cond (< left right) -1 (> left right) 1 :else 0)))
+
 (defn compare-typed-values
   "Language-owned total order for already validated values of one type."
   [type left right]
   (case type
-    :i64 (compare left right)
+    :i64 (compare-i64 left right)
     :string (compare left right)
     :bytes (let [n (min (bytes-byte-count left) (bytes-byte-count right))]
              (loop [i 0]
@@ -1818,10 +1842,10 @@
     :symbol (compare (str left) (str right))
     :bool (compare left right)
     :option-i64 (if (= (first left) (first right))
-                  (if (first left) (compare (second left) (second right)) 0)
+                  (if (first left) (compare-i64 (second left) (second right)) 0)
                   (if (first left) 1 -1))
     :result-i64 (if (= (first left) (first right))
-                  (compare (second left) (second right))
+                  (compare-i64 (second left) (second right))
                   (if (first left) 1 -1))
      :vector-i64 (compare-sequences (repeat (max (count left) (count right)) :i64)
                                    left right)
