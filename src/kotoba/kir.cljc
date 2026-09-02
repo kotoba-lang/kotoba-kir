@@ -1395,17 +1395,51 @@
 ;; never be readable as either verdict.
 
 (def ^:private kernel-memory-profile
-  "op -> [profile-maximum access-width-bytes], transcribed from
-  `kotoba.native.x86_64` and checked against `kotoba.native.aarch64`, which
-  admit identical bounds on both ISAs. An op absent from this map is not a
-  memory op."
-  '{kernel-load-u8     [512 1]
-    kernel-load-u8-4k  [4096 1]
-    kernel-load-u8-16k [16384 1]
-    kernel-store-u8    [512 1]
-    kernel-store-u8-4k [4096 1]
-    kernel-load-u32    [512 4]
-    kernel-store-u32   [512 4]
+  "op -> [profile-maximum access-width-bytes] for the BYTE-indexed window
+  family, transcribed from `kotoba.native.x86_64` and checked against
+  `kotoba.native.aarch64`, which admit identical bounds on both ISAs. An op
+  absent from this map and from `slice-memory-profile` is not a memory op.
+
+  memwidth: this used to be seven entries and is now thirty-two -- four widths
+  by four window tiers by load/store. Nothing was decided by adding them; what
+  was decided is that a width and a tier are two independent axes, which the
+  seven entries did not say. `kernel-store-u8` could reach 4096 and not 16384
+  while `kernel-load-u8` could reach both; the u32 pair could reach neither;
+  and there was no u16 access at all, which is what a PCI vendor/device ID
+  pair is, nor a u64 one, which is what a descriptor ring pointer is."
+  '{
+    kernel-load-u8       [512 1]
+    kernel-store-u8      [512 1]
+    kernel-load-u8-4k    [4096 1]
+    kernel-store-u8-4k   [4096 1]
+    kernel-load-u8-16k   [16384 1]
+    kernel-store-u8-16k  [16384 1]
+    kernel-load-u8-64k   [65536 1]
+    kernel-store-u8-64k  [65536 1]
+    kernel-load-u16      [512 2]
+    kernel-store-u16     [512 2]
+    kernel-load-u16-4k   [4096 2]
+    kernel-store-u16-4k  [4096 2]
+    kernel-load-u16-16k  [16384 2]
+    kernel-store-u16-16k [16384 2]
+    kernel-load-u16-64k  [65536 2]
+    kernel-store-u16-64k [65536 2]
+    kernel-load-u32      [512 4]
+    kernel-store-u32     [512 4]
+    kernel-load-u32-4k   [4096 4]
+    kernel-store-u32-4k  [4096 4]
+    kernel-load-u32-16k  [16384 4]
+    kernel-store-u32-16k [16384 4]
+    kernel-load-u32-64k  [65536 4]
+    kernel-store-u32-64k [65536 4]
+    kernel-load-u64      [512 8]
+    kernel-store-u64     [512 8]
+    kernel-load-u64-4k   [4096 8]
+    kernel-store-u64-4k  [4096 8]
+    kernel-load-u64-16k  [16384 8]
+    kernel-store-u64-16k [16384 8]
+    kernel-load-u64-64k  [65536 8]
+    kernel-store-u64-64k [65536 8]
     ;; The lock pair's ceiling is 4096, not 512: `kotoba.native.machine-ir`
     ;; gives them `[:gmir/kernel-try-lock-u32 4096]`. The width is the same
     ;; four bytes, so the `length - index >= 4` rule applies to them too.
@@ -1449,6 +1483,57 @@
   '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to})
 ;; boot: end
 
+(def ^:private slice-item-limit
+  "2^40 elements. Mirrors `kotoba.gmir/slice-item-limit` and
+  `kotoba.mir/slice-item-limit`, and is an ADDRESS-SPACE bound rather than a
+  window profile: amu ADR 0285's decision is that the bulk carrier does not
+  travel through the vector arena, so `vector-item-limit` (16384) is not its
+  ceiling. The value is chosen so that `length * 8` -- the widest element this
+  family carries -- cannot wrap a 64-bit address computation."
+  1099511627776)
+
+(def ^:private slice-memory-profile
+  "op -> [item-limit element-width-bytes] for the ELEMENT-indexed slice family.
+  `length` and `index` count ELEMENTS here, not bytes; the backends fold the
+  scale into the addressing mode (`mov rax,[rdx+rdi*8]` /
+  `ldr x0,[x1,x3,lsl #3]`) rather than making the guest compute a byte
+  offset."
+  '{slice-load-u8   [1099511627776 1]
+    slice-store-u8  [1099511627776 1]
+    slice-load-u16  [1099511627776 2]
+    slice-store-u16 [1099511627776 2]
+    slice-load-u32  [1099511627776 4]
+    slice-store-u32 [1099511627776 4]
+    slice-load-u64  [1099511627776 8]
+    slice-store-u64 [1099511627776 8]})
+
+(def ^:private unaligned-window-operations
+  "The window operations that do NOT require a naturally aligned index.
+
+  Every width>1 access added by memwidth checks `index % width == 0`, because
+  a misaligned MMIO access is architecturally undefined on AArch64 device
+  memory and splits the bus lock on x86. These four predate that rule and keep
+  their historical contract: retrofitting the check onto them would change the
+  bytes of shipped aiueos objects, and a caller that was misaligned was already
+  broken in a way this commit is not the place to discover. Recorded as an
+  asymmetry rather than smoothed over; closing it is a separate change with its
+  own re-pinning of every affected object."
+  '#{kernel-load-u32 kernel-store-u32 kernel-try-lock-u32 kernel-unlock-u32})
+
+(defn- memory-operation-profile [op]
+  (or (get kernel-memory-profile op) (get slice-memory-profile op)))
+
+(def ^:private checked-memory-operations
+  "Every operation `kernel-memory-call!` evaluates.
+
+  memwidth: derived from the two profile maps rather than written out a third
+  and fourth time. The eval dispatch and `lower`'s kernel-native set used to
+  spell the members by hand, which is exactly how a new operation reaches an
+  interpreter that has no case for it -- or, worse, does not reach `lower`'s
+  set and gets constant-oracled at compile time."
+  (into '#{kernel-subregion}
+        (concat (keys kernel-memory-profile) (keys slice-memory-profile))))
+
 (defn- word-above?
   "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
   [a b]
@@ -1474,6 +1559,18 @@
   #?(:clj (unchecked-subtract (long a) (long b))
      :cljs (i64/wrap-i64 (- (i64/->bigint a) (i64/->bigint b)))))
 
+;; memwidth: the backends' `test reg,imm` / `tst xN,#imm` against a
+;; `width - 1` mask, which is 0, 1, 3 or 7. Unsigned: a negative i64 is a huge
+;; address, and its LOW bits are what the machine tests, so the sign never
+;; enters. Width 1 masks with 0 and is therefore always aligned, which is why
+;; the u8 family needs no special case.
+(defn- word-aligned? [value width]
+  (let [mask (dec width)]
+    #?(:clj (zero? (bit-and (long value) (long mask)))
+       :cljs (= (js/BigInt 0)
+                (bit-and (js/BigInt.asUintN 64 (i64/->bigint value))
+                         (js/BigInt mask))))))
+
 (defn- word-byte
   "The byte `shift` bits up in `value`, as a plain number -- what the backends
   narrow to before `mov [mem],al`."
@@ -1482,6 +1579,13 @@
      :cljs (js/Number (js/BigInt.asUintN
                        8 (/ (js/BigInt.asUintN 64 (i64/->bigint value))
                             (js/BigInt (bit-shift-left 1 shift)))))))
+
+;; memwidth: the scaled byte offset a slice access addresses. `index` is
+;; bounded by `slice-item-limit` and `width` by 8 before this is reached, so
+;; the product is under 2^43 and cannot wrap.
+(defn- word-scale [index width]
+  #?(:clj (unchecked-multiply (long index) (long width))
+     :cljs (i64/wrap-i64 (* (i64/->bigint index) (js/BigInt width)))))
 
 (defn- ->word [n]
   #?(:clj (long n) :cljs (i64/->bigint n)))
@@ -1522,6 +1626,30 @@
        :cljs (i64/wrap-i64 (js/BigInt.asUintN (* 8 width)
                                               (i64/->bigint value))))))
 
+;; memwidth: assemble `width` little-endian bytes at `slot` into one runtime
+;; word, and take the `index`-th byte back out of one for a store.
+;;
+;; Written as repeated multiply/divide by 256 rather than as a shift, because
+;; ClojureScript's `bit-shift-left` is THIRTY-TWO bit: `(bit-shift-left 1 56)`
+;; is 16777216 there, not 2^56. The existing `word-byte` helper has that shape
+;; and is correct only because nothing had ever asked it for a byte above the
+;; fourth. u64 asks.
+;;
+;; A load below width 8 zero-extends, matching `movzx`/`mov r32`. At width 8
+;; the bits fill the word exactly, so a top byte >= 0x80 arrives as a negative
+;; i64 -- which is the correct pattern, since `:i64` here is signed.
+(defn- word-load [image slot width]
+  #?(:clj (loop [i (dec width) acc 0]
+            (if (neg? i)
+              acc
+              (recur (dec i) (unchecked-add (unchecked-multiply acc 256)
+                                            (long (nth image (+ slot i)))))))
+     :cljs (loop [i (dec width) acc (js/BigInt 0)]
+             (if (neg? i)
+               (i64/wrap-i64 (js/BigInt.asIntN 64 acc))
+               (recur (dec i) (+ (* acc (js/BigInt 256))
+                                 (js/BigInt (nth image (+ slot i)))))))))
+
 (defn- kernel-window-check!
   "The three checks `emit-kernel-load-u8` and its siblings emit, in their
   order, so a program that traps here traps on the machine and vice versa."
@@ -1558,18 +1686,56 @@
           (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                        :index index :length length}))
         (when (word-above? width (word-minus length index))
-          ;; sysops: the four-byte spelling is kept verbatim for width 4 --
-          ;; it is a pinned reason literal, and renaming it would move every
-          ;; assertion that names it while changing nothing about the check.
-          ;; Eight-byte access gets its own name rather than reporting a
-          ;; violation of a bound it does not have.
+          ;; memwidth: the reason literal names the WIDTH, so
+          ;; `:four-byte-access-outside-window` stays exactly what it was for
+          ;; every u32 access -- widening the family must not silently move a
+          ;; pinned reason under the two tests that assert it.
           (trap! :kernel-memory-fault
                  {:operation op
-                  :check (if (= width 8)
-                           :eight-byte-access-outside-window
-                           :four-byte-access-outside-window)
+                  :check (case width
+                           2 :two-byte-access-outside-window
+                           4 :four-byte-access-outside-window
+                           8 :eight-byte-access-outside-window)
                   :width width
-                  :index index :length length}))))))
+                  :index index :length length}))
+        ;; memwidth: natural alignment, LAST so it composes with the checks
+        ;; above rather than reordering them -- a program that was trapping on
+        ;; the window before still traps on the window.
+        ;;
+        ;; A misaligned MMIO access is architecturally undefined on AArch64
+        ;; device memory and splits the bus lock on x86, so the machine's
+        ;; answer to one is not a value; making it a Kotoba trap is the only
+        ;; answer that is. The four operations in
+        ;; `unaligned-window-operations` predate the rule and keep their
+        ;; historical contract; see that var for why.
+        (when-not (contains? unaligned-window-operations op)
+          (when-not (word-aligned? index width)
+            (trap! :kernel-memory-fault {:operation op :check :misaligned-access
+                                         :width width :index index})))))))
+
+(defn- slice-window-check!
+  "The slice family's checks, in the order the backends emit them.
+
+  Three, not four, and that is the point of the carrier: the ceiling is an
+  address-space bound rather than a window profile, so what is left per element
+  is ONE unsigned compare. The tail check the byte-window family needs
+  (`length - index >= width`) is structurally unnecessary here because `index`
+  counts elements -- `index < length` already says the whole element is
+  inside. Alignment is proved once on the BASE rather than per access, for the
+  same reason: a scaled index off an aligned base is aligned."
+  [op base length index]
+  (let [[limit width] (get slice-memory-profile op)]
+    (when (word-above? length limit)
+      (trap! :kernel-memory-fault {:operation op :check :length-above-slice-limit
+                                   :length length :limit limit}))
+    (when (word-zero? base)
+      (trap! :kernel-memory-fault {:operation op :check :null-base}))
+    (when-not (word-aligned? base width)
+      (trap! :kernel-memory-fault {:operation op :check :misaligned-slice-base
+                                   :width width :base base}))
+    (when (word-at-least? index length)
+      (trap! :kernel-memory-fault {:operation op :check :index-outside-slice
+                                   :index index :length length}))))
 
 (defn- image-slot
   "Index of `pointer + index` within the supplied image, or a refusal to
@@ -1611,9 +1777,20 @@
     ;; replacement for `xchg`, and the COMPARAND for `cmpxchg`, whose fifth
     ;; argument `replacement` is the word it writes on a match.
     (let [[base length index operand replacement] values
-          [_ width] (get kernel-memory-profile op)
-          _ (kernel-window-check! op base length index)
-          slot (image-slot memory op base index width)
+          ;; memwidth: the slice family shares this evaluator and differs in
+          ;; exactly two places -- which check runs, and whether `index` is a
+          ;; byte offset or an element count.
+          slice? (contains? slice-memory-profile op)
+          [_ width] (memory-operation-profile op)
+          _ (if slice?
+              (slice-window-check! op base length index)
+              (kernel-window-check! op base length index))
+          ;; A window access addresses `base + index`; a slice access addresses
+          ;; `base + index * width`, which is the scale the backends fold into
+          ;; the addressing mode.
+          slot (image-slot memory op base
+                           (if slice? (word-scale index width) index)
+                           width)
           bytes (:bytes memory)
           ;; sysops: read and write `width` little-endian bytes at `slot`.
           ;; Defined here rather than at the top level because they are only
@@ -1634,28 +1811,34 @@
                                                    (word-byte-at word n)))
                                           image (range width)))))]
       (case op
-        (kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k)
+        (kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k kernel-load-u8-64k
+         slice-load-u8)
         (->word (nth @bytes slot))
 
-        kernel-load-u32
-        (let [image @bytes]
-          (->word (+ (nth image slot)
-                     (* 256 (nth image (+ slot 1)))
-                     (* 65536 (nth image (+ slot 2)))
-                     (* 16777216 (nth image (+ slot 3))))))
+        ;; memwidth: every wider load is the same little-endian assembly over
+        ;; `width` bytes, so it is written once rather than three more times.
+        ;; A load ZERO-extends: `movzx r32,word` and `mov r32,dword` both leave
+        ;; the upper bits clear, and the u64 form fills the word exactly.
+        (kernel-load-u16 kernel-load-u16-4k kernel-load-u16-16k kernel-load-u16-64k
+         kernel-load-u32 kernel-load-u32-4k kernel-load-u32-16k kernel-load-u32-64k
+         kernel-load-u64 kernel-load-u64-4k kernel-load-u64-16k kernel-load-u64-64k
+         slice-load-u16 slice-load-u32 slice-load-u64)
+        (word-load @bytes slot width)
 
-        (kernel-store-u8 kernel-store-u8-4k)
-        (do (vswap! bytes assoc slot (word-byte operand 0))
+        (kernel-store-u8 kernel-store-u8-4k kernel-store-u8-16k kernel-store-u8-64k
+         slice-store-u8)
+        (do (vswap! bytes assoc slot (word-byte-at operand 0))
             ;; RAX still holds the stored word after `mov [rdx+rdi],al`.
             operand)
 
-        kernel-store-u32
-        (do (vswap! bytes assoc
-                    slot (word-byte operand 0)
-                    (+ slot 1) (word-byte operand 8)
-                    (+ slot 2) (word-byte operand 16)
-                    (+ slot 3) (word-byte operand 24))
-            operand)
+        ;; memwidth: every wider store is the same little-endian scatter over
+        ;; `width` bytes, so it is `write-word!` rather than three more
+        ;; hand-written cases.
+        (kernel-store-u16 kernel-store-u16-4k kernel-store-u16-16k kernel-store-u16-64k
+         kernel-store-u32 kernel-store-u32-4k kernel-store-u32-16k kernel-store-u32-64k
+         kernel-store-u64 kernel-store-u64-4k kernel-store-u64-16k kernel-store-u64-64k
+         slice-store-u16 slice-store-u32 slice-store-u64)
+        (do (write-word! operand) operand)
 
         ;; `lock cmpxchg` with the operation's own comparand and replacement:
         ;; 0 -> 1 to take, 1 -> 0 to release. Returns 1 when the swap happened.
@@ -3396,15 +3579,11 @@
         ;; the lock and gets 1 has shown that the object takes a free lock. It
         ;; has not shown anything whatsoever about two callers, because there
         ;; is only ever one here.
-        (contains? (into '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
-                            kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                            kernel-load-u32 kernel-store-u32
-                            kernel-try-lock-u32 kernel-unlock-u32}
-                         ;; sysops: the general atomics answer with an image
-                         ;; for exactly the reason the lock pair does -- see
-                         ;; `kernel-memory-call!`.
-                         kernel-atomic-operations)
-                   op)
+        ;; memwidth: derived from the profile maps rather than spelled out
+        ;; here a third time; `kernel-atomic-operations` joins from the sysops
+        ;; branch, which answers with an image for the same reason the lock
+        ;; pair does -- see `kernel-memory-call!`.
+        (contains? (into checked-memory-operations kernel-atomic-operations) op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
            op memory
@@ -3707,10 +3886,10 @@
 (defn lower [hir]
   (hir/validate! hir)
   (reject-loop-helper-self-calls-off-tail! hir)
-  (let [kernel-operations '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
-                             kernel-store-u8 kernel-store-u8-4k kernel-read-cr2
-                             kernel-subregion
-                             kernel-load-u32 kernel-store-u32
+  (let [kernel-operations
+        (into
+         checked-memory-operations
+         '#{kernel-read-cr2
                              ;; The lock pair marks a module kernel-native for
                              ;; the same reason the MSR pair does: without it
                              ;; the constant oracle would try to evaluate an
@@ -3762,7 +3941,7 @@
                              ;; effect. The interpreter traps rather than
                              ;; answering, so a module missing from this set
                              ;; does not compile at all.
-                             kernel-xgetbv}
+                             kernel-xgetbv})
         ;; sysops: both new families mark a module kernel-native, for the same
         ;; reason the MSR pair and the `cpuid` four do. Without them the
         ;; constant oracle would try to fold an atomic read-modify-write or an
