@@ -12,12 +12,15 @@
 (ns run-tests
   (:require [cljs.test :as t]
             [kotoba.kir-cljs-i64-ashr-test]
+            ;; a core let takes one body form; a core if takes three parts
+            [kotoba.kir-core-form-shape-test]
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
             [kotoba.kir-host-stack-trap-test]
             [kotoba.kir-kernel-memory-test]
             [kotoba.kir-kernel-privileged-test]
             [kotoba.kir-loop-helper-tail-position-test]
+            [kotoba.kir-rodata-literal-test]
             [kotoba.kir-uleb-i64-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
@@ -27,10 +30,12 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.kir-cljs-i64-ashr-test
+             'kotoba.kir-core-form-shape-test
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-kernel-memory-test
              'kotoba.kir-kernel-privileged-test
              'kotoba.kir-loop-helper-tail-position-test
+             'kotoba.kir-rodata-literal-test
              'kotoba.kir-uleb-i64-test)

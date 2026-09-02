@@ -1527,8 +1527,55 @@
 ;; return at all. There is no value this interpreter could return for any of
 ;; the four that would be right, and for the last one there is no value.
 (def ^:private kernel-uefi-operations
-  '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to})
+  '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to
+     ;; boot-lit: the two wider calls (kotoba-gmir ADR-0011). Six and eight
+     ;; operands, four and six UEFI arguments -- `AllocatePages`,
+     ;; `HandleProtocol`, `GetMemoryMap`, `OpenProtocol`. They refuse here for
+     ;; exactly the reason `kernel-uefi-call2` does; the arity is the only
+     ;; thing that differs, and it is the backend's business.
+     kernel-uefi-call4 kernel-uefi-call6})
 ;; boot: end
+
+;; boot-lit: read-only literals (kotoba-gmir ADR-0011).
+;;
+;; `(ucs2 "AIUEOS")`, `(guid "5B1B31A1-...")` and `(bytes-literal "48656c")`
+;; each answer with the ADDRESS of bytes the backend placed in the image.
+;; There is no address here. This interpreter has no image, no load base and
+;; no pool; any number it returned would be a number, and the caller would
+;; hand it to firmware as a `CHAR16 *`.
+;;
+;; They mark a module kernel-native for the same reason the port operations
+;; do -- without that the constant oracle folds one, this trap fires, and a
+;; program that compiles perfectly well fails to compile.
+(def ^:private rodata-address-operations
+  '#{ucs2 guid bytes-literal})
+
+;; `bytes-literal-length` is deliberately NOT in that set. It is the paired
+;; half of `bytes-literal` -- Kotoba has no multi-value return and no pair on
+;; a firmware target, so the address and the length are two heads over the
+;; same literal text -- and unlike the address, the length HAS an answer here:
+;; it is a property of the text, not of the machine. Refusing something
+;; answerable would make the oracle less useful for no gain, and would make a
+;; module that only asks how long a literal is kernel-native for nothing.
+(def ^:private rodata-length-operations
+  '#{bytes-literal-length})
+
+(defn- hex-pair-count
+  "Bytes an even-length hex string denotes, or nil. Deliberately NOT a hex
+  decoder: the byte VALUES belong to the backend that places them, and a
+  second decoder here would be a second thing that has to agree about what a
+  literal is. What this needs to know is only how many there are, and that
+  the text is hex at all -- an odd count or a non-hex digit is a malformed
+  literal whichever layer notices it."
+  [text]
+  (when (and (string? text) (even? (count text)))
+    (let [hex? (fn [character]
+                 (let [code #?(:clj (int character)
+                               :cljs (.charCodeAt character 0))]
+                   (or (<= 48 code 57) (<= 97 code 102) (<= 65 code 70))))]
+      (when (every? hex? text)
+        (quot (count text) 2)))))
+;; boot-lit: end
 
 ;; simd: the f32 dot product (kotoba-gmir ADR 0010).
 ;;
@@ -2312,6 +2359,81 @@
                         (doseq [a args] (walk a false)))))))]
       (walk body true))
     @found))
+
+(defn- core-form-shape-violation
+  "The first core form in BODY whose shape is not the one the interpreter and
+  every backend destructure, or nil.
+
+  `let` takes a binding vector and ONE body form; `if` takes exactly three
+  parts. Both rules were assumptions here rather than checks -- `eval-expr`
+  reads `(let [[bindings body] args] ...)` and `(let [[test then else] args]
+  ...)`, so a longer form ran its FIRST body / its `then` and the rest of the
+  program was silently absent.
+
+  That is not hypothetical, and it is not only an HIR-producer question: the
+  frontend had the identical hole on the way in, and until 2026-09-02
+
+    (defn run [n :i64] :i64 (let [x (+ n 1)] (+ x 10) (+ x 100)))
+
+  compiled with :ok true and answered 16 rather than 106. `hir/validate!`
+  checks the module envelope, not the shape of an expression, so nothing
+  between an arbitrary `kotoba.hir/v3` producer and the interpreter was
+  looking.
+
+  Refusing is right rather than making it work -- several body forms on a head
+  that takes one did not come from the frontend, which collapses them into a
+  `do`, and there is no principled way to guess which one the author meant.
+  Sequencing belongs to `do`, which is variadic on purpose and is checked here
+  only for emptiness.
+
+  The binding VECTOR is stepped through as pairs, never walked as a form: it is
+  a vector of binder/value, and treating it as an expression is how a related
+  gate next door admitted typed operations it meant to check."
+  [body]
+  (let [found (volatile! nil)]
+    (letfn [(walk [form]
+              (when (and (nil? @found) (seq? form) (seq form))
+                (let [[op & args] form]
+                  (cond
+                    (= op 'let)
+                    (let [bindings (first args)
+                          body-forms (rest args)]
+                      (if (not= 1 (count body-forms))
+                        (vswap! found (constantly
+                                       {:rejected :let-body-not-one-form
+                                        :form form
+                                        :body-forms (count body-forms)}))
+                        (do (when (sequential? bindings)
+                              (doseq [v (take-nth 2 (rest bindings))] (walk v)))
+                            (walk (first body-forms)))))
+
+                    (= op 'if)
+                    (if (not= 3 (count args))
+                      (vswap! found (constantly {:rejected :if-not-ternary
+                                                 :form form
+                                                 :arity (count args)}))
+                      (doseq [a args] (walk a)))
+
+                    (= op 'do)
+                    (if (empty? args)
+                      (vswap! found (constantly {:rejected :do-empty :form form}))
+                      (doseq [a args] (walk a)))
+
+                    :else (doseq [a args] (walk a))))))]
+      (walk body))
+    @found))
+
+(def ^:private core-form-shape-messages
+  {:let-body-not-one-form "let takes a binding vector and one body form"
+   :if-not-ternary "if takes exactly three parts: test, then, else"
+   :do-empty "do takes at least one form"})
+
+(defn- reject-core-form-shape-violations! [module]
+  (doseq [function (:functions module)
+          :let [violation (core-form-shape-violation (:body function))]
+          :when violation]
+    (throw (ex-info (get core-form-shape-messages (:rejected violation))
+                    (assoc violation :phase :ir :function (:name function))))))
 
 (defn- reject-loop-helper-self-calls-off-tail! [hir]
   (doseq [function (:functions hir)
@@ -3892,6 +4014,27 @@
                   op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
+        ;; boot-lit: a literal's address is not a value this interpreter has.
+        ;; Its own reason keyword rather than the privileged one, because it
+        ;; is a different refusal: the privileged family names instructions
+        ;; this machine is not running, and this one names a place in an image
+        ;; that does not exist.
+        (contains? rodata-address-operations op)
+        (trap! :rodata-address-unavailable {:operation op})
+
+        ;; boot-lit: the length, unlike the address, is a property of the
+        ;; literal text and is answerable here.
+        (contains? rodata-length-operations op)
+        (let [[text] args
+              count (or (hex-pair-count text)
+                        (trap! :rodata-literal-malformed
+                               {:operation op :content text}))]
+          ;; An i64 is a `long` on the JVM and a BigInt on ClojureScript; a
+          ;; plain JS number here reaches the result type check as
+          ;; `:value-type-mismatch`, which is how the two branches were found
+          ;; to disagree (nbb `run-tests.cljs`, 2026-09-02).
+          #?(:clj (long count) :cljs (i64/->bigint count)))
+
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
         (let [xs (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           #?(:clj
@@ -4005,6 +4148,7 @@
    (when-not (and (integer? kgraph-capacity) (<= 0 kgraph-capacity default-kgraph-capacity))
      (throw (ex-info "kgraph capacity is outside runtime limits"
                      {:phase :ir :kgraph-capacity kgraph-capacity})))
+   (reject-core-form-shape-violations! kir)
    (doseq [function (:functions kir)]
      (validated-closure-param-indexes function)
      (validated-i64-pair-chain-param-indexes function)
@@ -4118,6 +4262,7 @@
 
 (defn lower [hir]
   (hir/validate! hir)
+  (reject-core-form-shape-violations! hir)
   (reject-loop-helper-self-calls-off-tail! hir)
   (let [kernel-operations
         (into
@@ -4195,10 +4340,17 @@
         ;; simd: and the f32 dot product, which marks a module kernel-native
         ;; for the same reason every other memory operation does -- it reads
         ;; memory the constant oracle has not been given.
+        ;; boot-lit: and the three literal ADDRESS heads, for the same
+        ;; reason -- the oracle has no image to place a literal in, so folding
+        ;; one traps and aborts a compile that should have succeeded.
+        ;; `bytes-literal-length` is absent on purpose: it has an answer here,
+        ;; so folding it is correct and marking a module kernel-native for it
+        ;; would cost a whole constant-folding pass for nothing.
         kernel-operations (into kernel-operations
                                 (concat kernel-atomic-operations
                                         kernel-system-operations
                                         kernel-uefi-operations
+                                        rodata-address-operations
                                         kernel-dot-f32-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
