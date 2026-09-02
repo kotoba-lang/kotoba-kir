@@ -19,20 +19,32 @@
   *evaluate* an effectful definition by CID, and that receipt is the
   capability runtime's, not this namespace's.
 
-  ## Effect-row vocabulary: keywords only (measured 2026-09-02)
+  ## Effect-row vocabulary: named operations as keywords (bridged 2026-09-02)
 
   `effect-row-problem` admits a set of keywords and nothing else.  The
   compiler's `infer-effects` (kotoba-sema `frontend.cljc`, `direct-facts` /
   `normalize-effect-ceiling`) produces rows whose members are the wire form
   `[:cap/call <id>]` — vectors, not keywords — so a row taken straight from
   the compiler is refused here with \"definition effect row members must be
-  keywords\" and gets no CID.  That gap is real and is recorded, not bridged:
-  admitting vectors, or translating ids back to registry keywords, decides
-  which vocabulary the sealed row canonically carries, and that decision
-  belongs to the contract (`lang/code-identity.edn`
-  `:definition-cid :effect-row-vocabulary`), not to a quiet widening of the
-  admitted domain.  The refusal is pinned by a test so the record cannot go
-  stale silently.
+  keywords\" and gets no CID.  That refusal is deliberate and stays: the
+  sealed row carries the SEMANTIC vocabulary — the named operations
+  (`:state/transact`, `:clock/now`, `:host/http`) — because the numeric id is
+  wire ABI, not source vocabulary (`lang/code-identity.edn` `:ability
+  :source-model`: \"numeric IDs and portable envelopes are elaboration
+  targets\"; `lang/capability-catalog.edn`: `:numeric-id :not-user-facing`).
+  A catalog renumbering must not move a definition's identity, and a
+  definition's identity must not depend on which wire ABI a backend speaks.
+
+  The bridge is `effect-row-from-hir`: it takes what the compiler reports —
+  `{:effects #{[:cap/call 8] ...} :named-operations #{:state/transact ...}}` —
+  and the catalog's `id->name` (kotoba-sema owns the catalog and depends on
+  this repository, so the mapping is an argument, never a lookup made here),
+  and returns the keyword row.  A wire id the catalog cannot name is refused
+  with the exact message \"effect row wire id has no catalog name: [:cap/call
+  N]\" — never guessed, never carried through as a vector.  The encoding of
+  keyword rows is untouched: every frozen vector in
+  `lang/code-identity-vectors.edn` hashes to the same bytes it did before the
+  bridge, which the test suite asserts vector by vector.
 
   ## What the identity seals
 
@@ -272,12 +284,120 @@
                      :type (str (type value))}))))
 
 ;; ---------------------------------------------------------------------------
+;; effect-row bridge: compiler wire row -> sealed named-operation row
+;; ---------------------------------------------------------------------------
+
+(defn- wire-id
+  "A capability wire id as a host integer, or nil when X is not one.
+
+  Under nbb the compiler carries ids as JavaScript BigInt (typed Wasm metadata
+  indices must survive ULEB encoding past the safe-integer range), and a
+  BigInt is not `=` to the plain number the catalog keys on, so a lookup
+  without this normalisation silently finds nothing -- the shape of failure
+  where a check that could not measure returns what a passing check returns."
+  [x]
+  #?(:clj (when (integer? x) (long x))
+     :cljs (cond
+             (and (some? x) (identical? js/BigInt (.-constructor x))) (js/Number x)
+             (and (number? x) (integer? x)) x
+             :else nil)))
+
+(defn- wire-call? [member]
+  (and (vector? member)
+       (= 2 (count member))
+       (= :cap/call (first member))
+       (some? (wire-id (second member)))))
+
+(defn- refuse-bridge! [message data]
+  (throw (ex-info message (assoc data :problem :definition/effect-row-unbridged))))
+
+(defn effect-row-from-hir
+  "The compiler's inferred effect row, translated to the vocabulary the
+  definition identity seals: named operations as keywords.
+
+  HIR is anything carrying the compiler's report -- a checked module or one of
+  its functions -- and only two of its keys are read:
+
+    :effects           #{[:cap/call 8] ...}   the wire row `infer-effects` emits
+    :named-operations  #{:state/transact ...} what ability elaboration recorded
+                                              (optional; provenance, see below)
+
+  OPTS must carry `:id->name`, the catalog's wire id -> operation keyword
+  (`kotoba.sema/capability-id->name`).  kotoba-sema owns that catalog and
+  depends on this repository, so it is an argument here and never a lookup.
+
+  Returns the keyword row, ready to be `:definition/effect-row`.  Every
+  member of the returned set satisfies `effect-row-problem`, so the sealed
+  bytes for a bridged row are exactly the bytes a caller who resolved the
+  names by hand would have produced -- the bridge adds no encoding.
+
+  Fail-closed, with the reason in the message and `:problem
+  :definition/effect-row-unbridged` in the ex-data:
+
+  - a member that is not `[:cap/call <integer>]` is refused: the compiler
+    never produces anything else, so anything else is not a compiler row;
+  - a wire id the catalog does not name is refused with
+    \"effect row wire id has no catalog name: [:cap/call N]\" -- the only
+    way to reach such an id is a literal `(cap-call N x)` in source, and a
+    name invented for it would be a lie sealed into an identity;
+  - a catalog that maps two wire ids to one keyword is refused: the
+    translation would seal two different wire rows as one identity;
+  - a `:named-operations` member the catalog does not know is refused (the
+    same closed world the compiler applies to a `cap-call` keyword).  A named
+    operation absent from `:effects` is not an error -- a per-function row is
+    a subset of the module row that `:named-operations` was recorded against,
+    and the translation never depends on `:named-operations`: it is
+    provenance the catalog must be able to account for, not a second source
+    of names."
+  [hir {:keys [id->name] :as opts}]
+  (when-not (map? hir)
+    (refuse-bridge! "effect row bridge requires the compiler's HIR map" {:hir hir}))
+  (when-not (map? id->name)
+    (refuse-bridge! "effect row bridge requires :id->name (the catalog's wire id -> operation keyword)"
+                    {:opts (dissoc opts :id->name)}))
+  (let [row (:effects hir)
+        named (:named-operations hir)
+        catalog (into {} (keep (fn [[id kw]]
+                                 (when-let [n (wire-id id)] [n kw])))
+                      id->name)
+        known-names (set (vals catalog))]
+    (when-not (set? row)
+      (refuse-bridge! "effect row bridge requires :effects to be a set" {:effects row}))
+    (when-not (every? keyword? (vals catalog))
+      (refuse-bridge! ":id->name must map wire ids to keywords" {:id->name id->name}))
+    (when-not (= (count catalog) (count known-names))
+      (refuse-bridge! "catalog maps two wire ids to one operation name; the sealed row would conflate them"
+                      {:duplicates (into {} (filter (fn [[_ n]] (> n 1)))
+                                         (frequencies (vals catalog)))}))
+    (when-not (every? wire-call? row)
+      (refuse-bridge! (str "effect row member is not a wire capability call: "
+                           (pr-str (first (remove wire-call? row))))
+                      {:member (first (remove wire-call? row)) :effects row}))
+    (when (and (some? named) (not (and (set? named) (every? keyword? named))))
+      (refuse-bridge! ":named-operations must be a set of keywords" {:named-operations named}))
+    (let [translated
+          (into #{}
+                (map (fn [[_ raw]]
+                       (let [id (wire-id raw)]
+                         (or (get catalog id)
+                             (refuse-bridge!
+                              (str "effect row wire id has no catalog name: [:cap/call " id "]")
+                              {:wire-id id :effects row})))))
+                row)]
+      (doseq [op (or named #{})]
+        (when-not (contains? known-names op)
+          (refuse-bridge! (str "named operation has no catalog id: " (pr-str op))
+                          {:named-operation op})))
+      translated)))
+
+;; ---------------------------------------------------------------------------
 ;; definition shape
 ;; ---------------------------------------------------------------------------
 
 ;; Keyword members only. The compiler's inferred rows carry `[:cap/call id]`
 ;; vectors (see the namespace docstring, "Effect-row vocabulary"); they are
-;; refused here on purpose until the contract names the canonical vocabulary.
+;; refused here on purpose -- the sealed vocabulary is the named operation,
+;; and `effect-row-from-hir` is the one route from a wire row to it.
 ;; Widening this predicate is a contract change, not a bug fix.
 (defn- effect-row-problem [row]
   (cond
