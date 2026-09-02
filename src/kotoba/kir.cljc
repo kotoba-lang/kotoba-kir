@@ -303,7 +303,50 @@
                    :result (and (= 3 (count type))
                                 (native-word-value-type? (second type) (inc depth))
                                 (native-word-value-type? (nth type 2) (inc depth)))
+                   ;; slice-value: `[:slice T]` is TWO machine words -- a base
+                   ;; and a length -- and this predicate's whole subject is
+                   ;; what fits in one. It is written out rather than left to
+                   ;; the `false` below because it is the one shape here that
+                   ;; a source program can spell: kotoba-sema admits
+                   ;; `[:slice :u8]` as a parameter type and erases it into
+                   ;; two `:i64` parameters before emitting HIR (kotoba-sema
+                   ;; ADR 0009). If one ever arrives, the erasure did not run,
+                   ;; and `native-boundary-type-refusal` below says so by name
+                   ;; instead of leaving the caller to report "typed values
+                   ;; currently require ..." about a type it never mentions.
+                   :slice false
                    false))))))
+
+;; slice-value: types that exist in kotoba-sema's SOURCE syntax, are erased
+;; before KIR, and therefore must never appear in a `:param-types` or a
+;; `:result` here. Keyed by the type's head. Data rather than a `cond` so
+;; kotoba-verifier can compare against it the way it compares against
+;; `native-floating-point-operations` (this repo's ADR 0236).
+(def native-erased-source-carrier-types
+  {:slice :kotoba.error/slice-not-a-native-boundary-type})
+
+(defn native-boundary-type-refusal
+  "The NAMED reason TYPE cannot be a native function-boundary type, or nil.
+
+  `nil` does not mean admitted: most refusals here are by absence, which is
+  the right default for a gate. This answers only for the shapes a source
+  program can write and a lowering deliberately does not carry, so that the
+  refusal for those says which invariant broke."
+  [type]
+  (when (and (vector? type) (seq type))
+    (get native-erased-source-carrier-types (first type))))
+
+(defn native-unadmitted-boundary-types
+  "Every `{:function f :type t :reason code}` a native backend refuses at a
+  function boundary FOR A NAMED REASON. Empty when the only refusals are by
+  absence, which is the ordinary case."
+  [hir]
+  (vec
+   (for [{:keys [name param-types result]} (:functions hir)
+         type (cond-> (vec param-types) result (conj result))
+         :let [reason (native-boundary-type-refusal type)]
+         :when reason]
+     {:function name :type type :reason reason})))
 
 ;; A function-boundary type the native backends can carry in ONE machine word,
 ;; or box into one.
