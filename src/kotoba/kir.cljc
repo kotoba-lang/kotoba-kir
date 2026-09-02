@@ -4156,12 +4156,17 @@
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
+        entry-function (some #(when (= (:entry hir) (:name %)) %) (:functions hir))
+        entry-param-types (when entry-function
+                            (or (:param-types entry-function)
+                                (vec (repeat (count (:params entry-function)) :i64))))
         base {:format (if typed-values? :kotoba.kir/v4 :kotoba.kir/v3)
               :entry (:entry hir)
               :exports (:exports hir)
               :schemas (:schemas hir)
               :schema-identities (:schema-identities hir)
-              :signature (when (:entry hir) {:params [] :result (:result hir)})
+              :signature (when (:entry hir)
+                           {:params entry-param-types :result (:result hir)})
               :effects (:effects hir)
               :functions (mapv (fn [function]
                                  (validated-closure-param-indexes function)
@@ -4195,6 +4200,7 @@
         ;; hand back one. Sealing the boxed value keeps
         ;; `kotoba.verifier`'s own re-execution comparable to it directly.
         value (when (and (:entry hir) (contains? #{:i64 :bool} (:result hir))
+                         (empty? entry-param-types)
                          (empty? (:effects hir)) (not kernel-native?))
                 (execute base (:entry hir) [] {:fuel oracle-fuel}))]
     (assoc base

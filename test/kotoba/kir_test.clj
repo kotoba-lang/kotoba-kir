@@ -57,3 +57,14 @@
                         (kotoba.kir/lower
                          (assoc-in valid-hir [:functions 0 :effects]
                                    #{[:cap/call 7]})))))
+
+(deftest parameterized-entry-preserves-its-boundary-signature-without-oracling
+  (let [hir (-> valid-hir
+                (assoc :format :kotoba.hir/v3)
+                (assoc-in [:functions 0 :params] '[image system-table])
+                (assoc-in [:functions 0 :param-types] [:i64 :i64])
+                (assoc-in [:functions 0 :body] '(+ image (* 0 system-table))))
+        lowered (kotoba.kir/lower hir)]
+    (is (= {:params [:i64 :i64] :result :i64} (:signature lowered)))
+    (is (nil? (:oracle-value lowered)))
+    (is (empty? (:blocks lowered)))))
