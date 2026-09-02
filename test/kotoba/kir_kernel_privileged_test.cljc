@@ -57,6 +57,14 @@
 ;; duplicate; leaf 7 subleaf 0 is spelled `(kernel-cpuid-ebx 7 0)`.
 (def ^:private refusals
   ['(kernel-xgetbv 0)
+   ;; xsave: the write half. CR4 and XCR0 are firmware-initialised machine
+   ;; state, so "model them as cells starting at zero" would answer confidently
+   ;; with a value from a machine that does not exist -- and the caller's next
+   ;; act is `(kernel-xsetbv 0 (bit-or (kernel-xgetbv 0) 6))`, a
+   ;; read-modify-write that would then silently CLEAR whatever the firmware set.
+   '(kernel-read-cr4)
+   '(kernel-write-cr4 262144)
+   '(kernel-xsetbv 0 7)
    '(kernel-cpuid-eax 1 0)
    '(kernel-cpuid-ebx 7 0)
    '(kernel-cpuid-ecx 1 0)
@@ -73,7 +81,7 @@
       (is (= (first body) (:operation data))
           (str body " must name itself in the trap"))))
   ;; An empty table is not a green suite.
-  (is (= 7 (count refusals)) "SCANNED refusals"))
+  (is (= 10 (count refusals)) "SCANNED refusals"))
 
 ;; ---------------------------------------------------------------------------
 ;; `lower` does not start an oracle it cannot finish
@@ -99,3 +107,31 @@
   ;; `(bit-and ... 6)` around it is exactly the AVX2 guard's XCR0 test.
   (is (nil? (:oracle-value (kir/lower (module '(bit-and (kernel-xgetbv 0) 6)))))
       "one privileged read anywhere suppresses the module's oracle"))
+
+;; ---------------------------------------------------------------------------
+;; xsave: the extended-state enable marks a module kernel-native too
+;; ---------------------------------------------------------------------------
+
+;; The same two-set discipline as `kernel-xgetbv`, and the membership matters
+;; more here than for anything above it. `(kernel-read-cr4)` is ZERO-arity and
+;; `(kernel-xsetbv 0 7)` is two literals -- there is nothing in either shape to
+;; suggest an effect -- so a constant folder has every structural reason to
+;; evaluate them, and without the membership `lower` itself throws on a
+;; perfectly valid kernel.
+(deftest the-extended-state-enable-marks-a-module-kernel-native
+  (doseq [body ['(kernel-read-cr4)
+                '(kernel-write-cr4 262144)
+                '(kernel-xsetbv 0 7)
+                ;; The spelling a kernel actually writes: read, set two bits,
+                ;; write back. Both halves are privileged and the folder must
+                ;; not start on either.
+                '(kernel-xsetbv 0 (bit-or (kernel-xgetbv 0) 6))]]
+    (let [lowered (kir/lower (module body))]
+      (is (nil? (:oracle-value lowered))
+          (str body " has no compile-time value"))
+      (is (= [] (:blocks lowered))
+          (str body " leaves no folded constant block"))))
+  ;; The control, repeated here rather than borrowed: without it, a `lower`
+  ;; that had stopped folding EVERYTHING would pass the four rows above.
+  (is (= 262150 (w (:oracle-value (kir/lower (module '(bit-or 262144 6))))))
+      "a pure expression over the same literals still folds"))
