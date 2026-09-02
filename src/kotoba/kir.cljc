@@ -1410,7 +1410,35 @@
     ;; gives them `[:gmir/kernel-try-lock-u32 4096]`. The width is the same
     ;; four bytes, so the `length - index >= 4` rule applies to them too.
     kernel-try-lock-u32 [4096 4]
-    kernel-unlock-u32   [4096 4]})
+    kernel-unlock-u32   [4096 4]
+    ;; sysops: the general atomics (kotoba-gmir ADR 0007). The lock pair fixes
+    ;; its comparand and replacement; these take the word from the guest, which
+    ;; is what a device descriptor ring needs. Same page ceiling, and the width
+    ;; is the operation's own -- four bytes or eight.
+    kernel-atomic-add-u32 [4096 4]
+    kernel-atomic-add-u64 [4096 8]
+    kernel-xchg-u32       [4096 4]
+    kernel-xchg-u64       [4096 8]
+    kernel-cmpxchg-u32    [4096 4]
+    kernel-cmpxchg-u64    [4096 8]})
+
+;; sysops: named once, so the profile, the evaluator's dispatch and `lower`'s
+;; kernel-native scan cannot drift apart.
+(def ^:private kernel-atomic-operations
+  '#{kernel-atomic-add-u32 kernel-atomic-add-u64
+     kernel-xchg-u32 kernel-xchg-u64
+     kernel-cmpxchg-u32 kernel-cmpxchg-u64})
+
+;; sysops: the x86 facilities that have no value an interpreter could invent.
+;; A barrier orders memory operations the oracle does not reorder in the first
+;; place, `rdtsc` is a property of the machine this is not running on, and
+;; `swapgs` moves state this interpreter does not model -- so they refuse for
+;; the same reason `kernel-cpuid-*` does, and appear in the refusal set and in
+;; `lower`'s kernel-native scan below.
+(def ^:private kernel-system-operations
+  '#{kernel-fence-load kernel-fence-store kernel-fence-full
+     kernel-rdtsc kernel-rdtscp kernel-swapgs})
+;; sysops: end
 
 (defn- word-above?
   "Unsigned `>` on two i64 runtime words -- the backends' `ja`."
@@ -1449,6 +1477,42 @@
 (defn- ->word [n]
   #?(:clj (long n) :cljs (i64/->bigint n)))
 
+;; sysops: 256^n, built by repeated multiplication rather than a shift.
+;;
+;; `word-byte` above takes a BIT shift and, on cljs, divides by
+;; `(js/BigInt (bit-shift-left 1 shift))`. That is correct for every shift it
+;; is given today (0, 8, 16, 24) and WRONG for 32 and above, because cljs
+;; `bit-shift-left` coerces to int32 -- the exact hazard
+;; `kotoba.kir.cljs-i64/ashr`'s own docstring records having committed once.
+;; Eight-byte access needs shifts up to 56, so it gets its own helper rather
+;; than a fourth caller of the one with the trap in it.
+(defn- word-pow256 [n]
+  #?(:clj (bit-shift-left 1 (* 8 n))
+     :cljs (loop [k n acc (js/BigInt 1)]
+             (if (pos? k) (recur (dec k) (* acc (js/BigInt 256))) acc))))
+
+(defn- word-times [a b]
+  #?(:clj (unchecked-multiply (long a) (long b))
+     :cljs (i64/wrap-i64 (* (i64/->bigint a) (i64/->bigint b)))))
+
+(defn- word-byte-at
+  "The `n`th byte of `value`, counting from the least significant."
+  [value n]
+  #?(:clj (int (bit-and (unsigned-bit-shift-right (long value) (* 8 n)) 255))
+     :cljs (js/Number (js/BigInt.asUintN
+                       8 (/ (js/BigInt.asUintN 64 (i64/->bigint value))
+                            (word-pow256 n))))))
+
+(defn- word-truncate
+  "`value` narrowed to `width` bytes and zero-extended back to a machine word
+  -- what a 32-bit register write leaves in the 64-bit register."
+  [width value]
+  (if (= width 8)
+    (->word value)
+    #?(:clj (bit-and (long value) (dec (bit-shift-left 1 (* 8 width))))
+       :cljs (i64/wrap-i64 (js/BigInt.asUintN (* 8 width)
+                                              (i64/->bigint value))))))
+
 (defn- kernel-window-check!
   "The three checks `emit-kernel-load-u8` and its siblings emit, in their
   order, so a program that traps here traps on the machine and vice versa."
@@ -1464,7 +1528,10 @@
         (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                      :index index :length length}))
       ;; Two checks, in the order `kotoba.native.machine-ir` lowers them:
-      ;; `index < length`, and then `length - index >= 4`. Neither can wrap.
+      ;; `index < length`, and then `length - index >= width`. Neither can wrap.
+      ;; The tail was written as the literal 4 while four bytes was the only
+      ;; multi-byte width; it is the operation's own width now that eight-byte
+      ;; atomics exist, and is still 4 for every operation that had it before.
       ;;
       ;; The first version of this read only kotoba-native's `emit-kernel-load-u32`,
       ;; which computes `index + 4` with `lea` and compares THAT -- a form where
@@ -1481,9 +1548,19 @@
         (when (word-at-least? index length)
           (trap! :kernel-memory-fault {:operation op :check :index-outside-window
                                        :index index :length length}))
-        (when (word-above? 4 (word-minus length index))
-          (trap! :kernel-memory-fault {:operation op :check :four-byte-access-outside-window
-                                       :index index :length length}))))))
+        (when (word-above? width (word-minus length index))
+          ;; sysops: the four-byte spelling is kept verbatim for width 4 --
+          ;; it is a pinned reason literal, and renaming it would move every
+          ;; assertion that names it while changing nothing about the check.
+          ;; Eight-byte access gets its own name rather than reporting a
+          ;; violation of a bound it does not have.
+          (trap! :kernel-memory-fault
+                 {:operation op
+                  :check (if (= width 8)
+                           :eight-byte-access-outside-window
+                           :four-byte-access-outside-window)
+                  :width width
+                  :index index :length length}))))))
 
 (defn- image-slot
   "Index of `pointer + index` within the supplied image, or a refusal to
@@ -1520,11 +1597,33 @@
           (trap! :kernel-memory-fault {:operation op :check :subwindow-outside-window
                                        :sublength sublen :remaining remaining})))
       (word-plus base offset))
-    (let [[base length index value] values
+    ;; sysops: `operand` is the fourth argument under every spelling -- the
+    ;; stored word for the u8/u32 stores, the addend for `atomic-add`, the
+    ;; replacement for `xchg`, and the COMPARAND for `cmpxchg`, whose fifth
+    ;; argument `replacement` is the word it writes on a match.
+    (let [[base length index operand replacement] values
           [_ width] (get kernel-memory-profile op)
           _ (kernel-window-check! op base length index)
           slot (image-slot memory op base index width)
-          bytes (:bytes memory)]
+          bytes (:bytes memory)
+          ;; sysops: read and write `width` little-endian bytes at `slot`.
+          ;; Defined here rather than at the top level because they are only
+          ;; meaningful once the window check and the image slot have passed.
+          read-word (fn []
+                      (let [image @bytes]
+                        (reduce (fn [acc n]
+                                  (word-plus acc
+                                             (word-times
+                                              (->word (nth image (+ slot n)))
+                                              (word-pow256 n))))
+                                (->word 0) (range width))))
+          write-word! (fn [word]
+                        (vswap! bytes
+                                (fn [image]
+                                  (reduce (fn [image n]
+                                            (assoc image (+ slot n)
+                                                   (word-byte-at word n)))
+                                          image (range width)))))]
       (case op
         (kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k)
         (->word (nth @bytes slot))
@@ -1537,17 +1636,17 @@
                      (* 16777216 (nth image (+ slot 3))))))
 
         (kernel-store-u8 kernel-store-u8-4k)
-        (do (vswap! bytes assoc slot (word-byte value 0))
-            ;; RAX still holds `value` after `mov [rdx+rdi],al`.
-            value)
+        (do (vswap! bytes assoc slot (word-byte operand 0))
+            ;; RAX still holds the stored word after `mov [rdx+rdi],al`.
+            operand)
 
         kernel-store-u32
         (do (vswap! bytes assoc
-                    slot (word-byte value 0)
-                    (+ slot 1) (word-byte value 8)
-                    (+ slot 2) (word-byte value 16)
-                    (+ slot 3) (word-byte value 24))
-            value)
+                    slot (word-byte operand 0)
+                    (+ slot 1) (word-byte operand 8)
+                    (+ slot 2) (word-byte operand 16)
+                    (+ slot 3) (word-byte operand 24))
+            operand)
 
         ;; `lock cmpxchg` with the operation's own comparand and replacement:
         ;; 0 -> 1 to take, 1 -> 0 to release. Returns 1 when the swap happened.
@@ -1563,7 +1662,41 @@
                         slot (bit-and desired 255)
                         (+ slot 1) 0 (+ slot 2) 0 (+ slot 3) 0)
                 (->word 1))
-            (->word 0)))))))
+            (->word 0)))
+
+        ;; sysops: the general atomics. Each is a single read-modify-write over
+        ;; bytes the caller supplied, with the operand the caller supplied, in
+        ;; an interpreter with one thread -- determined, not invented, which is
+        ;; the same argument the lock pair's epitaph above makes.
+        ;;
+        ;; The same boundary applies and any receipt built on this has to carry
+        ;; it: this models the UNCONTENDED case and nothing else. Getting the
+        ;; expected old word back shows the object performs the exchange it
+        ;; claims to. It shows nothing whatsoever about two callers, because
+        ;; there is only ever one here.
+        ;;
+        ;; Every one of them ANSWERS WITH THE OLD WORD, matching what the
+        ;; machine leaves in the destination register: `xadd` and `xchg` put
+        ;; the previous memory contents in the source register, and `cmpxchg`
+        ;; leaves it in EAX/RAX whether or not the swap happened.
+        (kernel-atomic-add-u32 kernel-atomic-add-u64)
+        (let [old (read-word)]
+          (write-word! (word-truncate width (word-plus old operand)))
+          old)
+
+        (kernel-xchg-u32 kernel-xchg-u64)
+        (let [old (read-word)]
+          (write-word! (word-truncate width operand))
+          old)
+
+        ;; The comparand is the guest's, which is the entire difference from
+        ;; the lock pair. It is compared at the operation's own width, because
+        ;; `lock cmpxchg` on a doubleword compares EAX and not RAX.
+        (kernel-cmpxchg-u32 kernel-cmpxchg-u64)
+        (let [old (read-word)]
+          (when (= old (word-truncate width operand))
+            (write-word! (word-truncate width replacement)))
+          old)))))
 
 (defn- validated-memory
   "Admit an optional `:memory` image for `execute`."
@@ -3254,10 +3387,15 @@
         ;; the lock and gets 1 has shown that the object takes a free lock. It
         ;; has not shown anything whatsoever about two callers, because there
         ;; is only ever one here.
-        (contains? '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
-                      kernel-store-u8 kernel-store-u8-4k kernel-subregion
-                      kernel-load-u32 kernel-store-u32
-                      kernel-try-lock-u32 kernel-unlock-u32} op)
+        (contains? (into '#{kernel-load-u8 kernel-load-u8-4k kernel-load-u8-16k
+                            kernel-store-u8 kernel-store-u8-4k kernel-subregion
+                            kernel-load-u32 kernel-store-u32
+                            kernel-try-lock-u32 kernel-unlock-u32}
+                         ;; sysops: the general atomics answer with an image
+                         ;; for exactly the reason the lock pair does -- see
+                         ;; `kernel-memory-call!`.
+                         kernel-atomic-operations)
+                   op)
         (if-let [memory (:memory heap)]
           (kernel-memory-call!
            op memory
@@ -3282,7 +3420,7 @@
         ;; run on. Answering would not merely invent a value: the six aiueos
         ;; sites BRANCH on it, so an invented answer becomes "this CPU supports
         ;; NX" decided by a compiler that has never seen the CPU. It refuses.
-        (contains? '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
+        (contains? (into '#{kernel-boot-info kernel-read-cr0 kernel-write-cr0
                       kernel-read-cr2 kernel-read-cr3 kernel-write-cr3 kernel-invlpg
                       kernel-read-cs kernel-page-fault-handler-address
                       kernel-rt-timer-handler-address
@@ -3297,7 +3435,19 @@
                       kernel-in-u8 kernel-in-u32
                       kernel-read-msr kernel-write-msr
                       kernel-cpuid-eax kernel-cpuid-ebx
-                      kernel-cpuid-ecx kernel-cpuid-edx} op)
+                      kernel-cpuid-ecx kernel-cpuid-edx}
+                   ;; sysops: the barriers, the timestamp counter and the
+                   ;; GS-base swap refuse for the `cpuid` reason, not the
+                   ;; `kernel-load-u8` reason. A barrier orders memory
+                   ;; operations against a machine this interpreter is not
+                   ;; running on -- and there is nothing to order here, since
+                   ;; the oracle executes one operation at a time, so an answer
+                   ;; would be "the barrier worked" from something that never
+                   ;; had the problem. `rdtsc` is the machine's own cycle
+                   ;; counter. `swapgs` moves a segment base this interpreter
+                   ;; does not model.
+                   kernel-system-operations)
+                  op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -3573,6 +3723,15 @@
                              ;; time no matter how constant its inputs look.
                              kernel-cpuid-eax kernel-cpuid-ebx
                              kernel-cpuid-ecx kernel-cpuid-edx}
+        ;; sysops: both new families mark a module kernel-native, for the same
+        ;; reason the MSR pair and the `cpuid` four do. Without them the
+        ;; constant oracle would try to fold an atomic read-modify-write or an
+        ;; `rdtsc` at compile time. The interpreter traps rather than
+        ;; answering, so the failure would be loud -- but it would abort the
+        ;; compile of a program that is perfectly valid.
+        kernel-operations (into kernel-operations
+                                (concat kernel-atomic-operations
+                                        kernel-system-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))
