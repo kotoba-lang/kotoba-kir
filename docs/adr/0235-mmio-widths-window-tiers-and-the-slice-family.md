@@ -1,4 +1,4 @@
-# ADR 0229: MMIO widths, window tiers, and the ADR 0285 slice family
+# ADR 0235: MMIO widths, window tiers, and the ADR 0285 slice family
 
 ## Status
 
