@@ -15,6 +15,64 @@
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
 
 (def ^:private default-fuel 512)
+
+;; fuel64: the ceiling on a declared execution budget, and the place it is
+;; DECIDED rather than restated.
+;;
+;; There was no ceiling here before -- `execute` asked only that the budget be
+;; a positive integer -- and there did not need to be one, because the number
+;; nobody could exceed lived somewhere else: `kotoba.native.elf64` wrote an
+;; object's per-call budget with `mov qword [r9+8], imm32`, so 2,147,483,647
+;; was the largest tier any object could carry. Two ADRs reasoned from that
+;; number as though it were the ABI (aiueos ADR-0142 sized the `sha256-region`
+;; window from it; QWEN-KERNELS-2 concluded `evaluate_token` cannot be one
+;; object because the output projection alone wants 13x it). It was the
+;; immediate width and nothing more: the context field is a qword, the charge
+;; is `dec qword [r9+8]`, and the image route always wrote eight data bytes.
+;;
+;; With the immediate widened, the binding constraint moves HERE, to the
+;; counter this file keeps. `charge!` is `(vswap! fuel dec)` on a plain host
+;; number -- deliberately, since fuel is interpreter bookkeeping and never a
+;; guest value -- and on Node that number is a double. MEASURED there on
+;; 2026-09-03, not argued: at 9,007,199,254,740,996 (2^53+4) the expression
+;; `x - 1 === x` is ALREADY TRUE, and from 2^54 up it is true of every value.
+;; 2^53-1 is the last budget from which every decrement all the way to zero is
+;; exact. A budget above this line is one the oracle would never see reach
+;; zero: it would answer `:ok` for a program that does not terminate, which is the
+;; single answer a fuel bound exists to prevent. The JVM's Long would carry
+;; 2^63-1 and the machine's qword would carry it too, and neither is the
+;; ceiling, because the JVM-free route is the one Q9 makes normative and the
+;; two routes have to agree.
+;;
+;; NOT the same number as `kotoba.wasm/max-fuel` (2^62-1), and the difference
+;; is not an oversight. That ceiling is set by what an SLEB128-encoded i64
+;; global can carry and be reported back; a wasm module's counter is an i64
+;; throughout, with no double anywhere in the path. Two counters, two exact
+;; ranges, two ceilings -- stated in both places rather than averaged. (A wasm
+;; budget of 2^62 handed to THIS interpreter would stall on its first charge:
+;; measured, `4611686018427388000 - 1 === 4611686018427388000`. The ceilings
+;; are not interchangeable and this is what that costs.)
+;;
+;; Restated, deliberately, in three other files, because none of them should
+;; depend on this one for an integer: `kotoba.native.elf64/max-object-fuel`
+;; (the packager must not pull the evaluator onto the JVM-free packaging
+;; path), `kotoba.verifier` (which re-derives its tables on purpose so a
+;; producer cannot ratify itself), and `kotoba.compiler.nbb.cli`. amu is the
+;; one place where more than one of them is on a classpath at once, so amu is
+;; where they are actually compared.
+(def max-fuel
+  "Largest admitted execution budget: 2^53-1, where both counters are exact."
+  9007199254740991)
+
+;; The initial budget of the run in progress, so a `:fuel-exhausted` trap can
+;; name the budget that was actually exhausted. It used to report
+;; `{:limit default-fuel}` unconditionally -- 512 -- for every run, including
+;; the ones the aiueos objects make at 250,000,000, so the one field in the
+;; trap that says HOW MUCH was available said the wrong number every time the
+;; caller passed `:fuel`. Harmless while every interesting budget was within
+;; an order of magnitude of the default; actively misleading now that a budget
+;; can be 4.3e9.
+(def ^:private ^:dynamic *fuel-limit* nil)
 ;; Compile-time constant oracle may need more budget than the historical
 ;; runtime default (T7.2 / T7.4 deep loop). Runtime `execute` still defaults
 ;; to `default-fuel` (512) unless the caller passes `:fuel`.
@@ -1080,7 +1138,7 @@
    (let [remaining (vswap! fuel dec)]
      (when (neg? remaining)
        (trap! :fuel-exhausted
-              (merge {:limit default-fuel}
+              (merge {:limit (or *fuel-limit* default-fuel)}
                      (when (map? context) context)))))))
 
 (defn- f64-divide [left right]
@@ -4782,8 +4840,14 @@
    ;; fuel/pair-capacity/kgraph-capacity are interpreter-internal config,
    ;; never a `.kotoba` value -- plain `integer?` is correct for both
    ;; runtimes here.
-   (when-not (and (integer? fuel) (pos? fuel))
-     (throw (ex-info "fuel must be a positive integer" {:phase :ir :fuel fuel})))
+   ;; fuel64: an UPPER bound as well as a lower one. `max-fuel` is where both
+   ;; counters that ever hold this number are still exact -- see its docstring.
+   ;; Refusing here rather than clamping, because a clamped budget is a
+   ;; different program's answer wearing this program's receipt.
+   (when-not (and (integer? fuel) (pos? fuel) (<= fuel max-fuel))
+     (throw (ex-info "fuel must be a positive integer within the admitted ceiling"
+                     {:phase :ir :reason :fuel-outside-admitted-range
+                      :fuel fuel :maximum max-fuel})))
    (when-not (and (integer? pair-capacity) (<= 0 pair-capacity default-pair-capacity))
      (throw (ex-info "pair capacity is outside runtime limits"
                      {:phase :ir :pair-capacity pair-capacity})))
@@ -4837,7 +4901,10 @@
          :disjoint-set-i64 (value/bounded-disjoint-set-i64! arg)
          :document (value/bounded-document! arg)
          (value/bounded-typed-value! type arg))))
-     (let [invoke #(binding [*runtime-schemas* (:schemas kir)]
+     (let [invoke #(binding [*runtime-schemas* (:schemas kir)
+                             ;; fuel64: so a :fuel-exhausted trap names the
+                             ;; budget this run actually had.
+                             *fuel-limit* fuel]
                      (invoke-function function
                                     (mapv (fn [arg type]
                                             (if (= type :i64)
