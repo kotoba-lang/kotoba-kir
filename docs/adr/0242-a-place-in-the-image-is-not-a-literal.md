@@ -1,4 +1,4 @@
-# ADR-0241: A place in the image is not a literal, and neither is a function name
+# ADR-0242: A place in the image is not a literal, and neither is a function name
 
 - Status: accepted
 - Date: 2026-09-02
