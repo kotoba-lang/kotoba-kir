@@ -94,11 +94,15 @@
 ;; needs no conversion at all -- there is no narrower-than-8-bytes packing
 ;; anywhere else in either file. `:f64` is deliberately NOT admitted here
 ;; even though it's part of ADR 0043 (the WASM Component Model analog this
-;; native slice is modeled on): `kotoba.compiler.core/compile-source*`'s
-;; own f32/f64 gate unconditionally rejects ANY `:f32`/`:f64` usage on
-;; native targets today (`ir/uses-f32?`/`ir/uses-f64?`), independent of
-;; records -- admitting f64 record fields here would silently also have to
-;; widen THAT orthogonal, pre-existing gate, which is exactly the "don't
+;; native slice is modeled on). When this comment was written the reason was
+;; that `kotoba.compiler.core/compile-source*`'s own gate rejected ANY
+;; `:f32`/`:f64` usage on native (`ir/uses-f32?`/`ir/uses-f64?`); both widths
+;; now reach native as OPERATIONS over i64 words, so the remaining reason is
+;; narrower and is about the FIELD SLOT, not the gate: a record field holding a
+;; float would have to declare which of the two widths its 8 bytes carry, and
+;; nothing in the slot machinery reads a field's declared type at runtime.
+;; Admitting one here would silently also have to widen that orthogonal,
+;; still-separate question, which is exactly the "don't
 ;; widen two dimensions in one step" pattern this compiler's own component
 ;; ADR chain (0058/0059) explicitly avoids. Native f64 record fields remain
 ;; a separately-gapped follow-up, not attempted by this increment.
@@ -115,10 +119,12 @@
 ;; and string variant payloads directly, bypassing this gate: all four cases
 ;; emit, including projecting the string back out and measuring it.
 ;;
-;; `:f64` stays out for the reason the previous comment gave and which has not
-;; changed: `kotoba.compiler.core`'s own f32/f64 gate rejects any f64 on native
-;; independently of records, so admitting it here would silently have to widen
-;; that orthogonal gate too. `:keyword` is admitted for the same reason `:string` is:
+;; `:f64` stays out for the reason the previous comment gave, restated: the
+;; question is not whether native can compute on floats -- it can, at both
+;; widths -- but that a float field would have to say which width its one word
+;; carries, and no field's declared type is read at runtime. That is a separate
+;; question from the operation gate and is not answered here.
+;; `:keyword` is admitted for the same reason `:string` is:
 ;; the backends now carry a keyword as the same one-word pair(offset,length)
 ;; handle, over its printed text, which is the representation
 ;; `kotoba.wasm.core` already chose for keyword literals. That admitted keyword
@@ -489,12 +495,62 @@
                   ;; reasoning as `i32-operations` above: no new value
                   ;; representation, only i64 words -- here carrying an
                   ;; IEEE-754 bit pattern. Both native ISAs emit these
-                  ;; directly. f32 is deliberately absent: neither backend
-                  ;; implements it.
+                  ;; directly.
                   (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
                                 f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
                              op)
                   (every? walk args)
+                  ;; f32: binary32 arithmetic on native
+                  ;; (ADR-kotoba-floating-point-on-native). Same admission
+                  ;; shape as the f64 line above and for the same reason: no
+                  ;; new value representation, only i64 words. The word an f32
+                  ;; occupies is its binary32 pattern SIGN-EXTENDED from bit 31,
+                  ;; which is what makes `f32-to-bits` an identity exactly the
+                  ;; way `f64-to-bits` is -- and what makes `f32-from-bits` the
+                  ;; one member of this family that is NOT an identity on
+                  ;; native: it sign-extends, canonicalising a zero-extended
+                  ;; u32 (what `kernel-load-u32` returns) into the same word a
+                  ;; signed i32 already is.
+                  ;;
+                  ;; `f32-min`/`f32-max` are deliberately NOT here, and this is
+                  ;; the one place the f32 family is narrower than the f64 one.
+                  ;; x86's MINSS/MAXSS return the SECOND operand when either
+                  ;; input is NaN; AArch64's FMIN/FMAX return the NaN; and this
+                  ;; interpreter -- the definition -- uses Math/min, which also
+                  ;; returns the NaN. So the f64 line above admits two
+                  ;; operations on which x86 already disagrees with both the
+                  ;; other ISA and the oracle. That is a pre-existing defect
+                  ;; (recorded, not repaired here, because repairing it moves
+                  ;; f64 goldens); this slice declines to duplicate it into a
+                  ;; second width.
+                  (contains? '#{f32-add f32-sub f32-mul f32-div
+                                f32-abs f32-neg f32-sqrt f32-from-bits f32-to-bits}
+                             op)
+                  (every? walk args)
+                  ;; Width conversions. Only the ones on which both ISAs and
+                  ;; this interpreter agree for EVERY input:
+                  ;;
+                  ;;   f32-to-f64-exact   widening, no rounding, no domain
+                  ;;   f64-to-f32-rounded round-to-nearest-even, overflow -> Inf
+                  ;;   i64-to-f{32,64}-rounded  every i64 converts; RNE
+                  ;;
+                  ;; The `-checked` conversions (`i64-to-f32-checked`,
+                  ;; `f32-to-i64-checked`, and their f64 twins) stay out: they
+                  ;; TRAP here on inexactness and neither backend emits that
+                  ;; check, so admitting them would let a program that must
+                  ;; trap compute an answer instead.
+                  ;;
+                  ;; The truncating float->int conversions
+                  ;; (`f32-to-i64-truncating`, `f64-to-i64-truncating`) stay out
+                  ;; for a sharper reason: on an out-of-domain input there are
+                  ;; three different answers. x86 CVTTSS2SI yields the integer
+                  ;; indefinite value (INT64_MIN), AArch64 FCVTZS saturates, and
+                  ;; this interpreter traps. Making them agree needs an emitted
+                  ;; domain check, which is a separate increment.
+                  (contains? '#{f32-to-f64-exact f64-to-f32-rounded
+                                i64-to-f32-rounded i64-to-f64-rounded}
+                             op)
+                  (and (= 1 (count args)) (walk (first args)))
                   ;; f64 comparisons. These DO produce a genuine `:bool`-typed
                   ;; value, which the `true`/`false` comment above says only a
                   ;; literal could -- that was written before f64 reached
@@ -503,6 +559,13 @@
                   ;; comparisons already do, into the same 0/1 word.
                   (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
                                 f64-unordered} op)
+                  (and (= 2 (count args)) (every? walk args))
+                  ;; f32 comparisons. Identical shape to the f64 line above:
+                  ;; a compare-and-setcc pair into the same 0/1 word, over the
+                  ;; single-precision compare (UCOMISS / FCMP s) instead of the
+                  ;; double one. Unordered handling is the f64 path's, unchanged.
+                  (contains? '#{f32-eq f32-lt f32-le f32-gt f32-ge
+                                f32-unordered} op)
                   (and (= 2 (count args)) (every? walk args))
                   ;; Keyword OPERATIONS, which `native-word-field-types`'s
                   ;; comment listed as needing a general substring and
