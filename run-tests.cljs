@@ -18,6 +18,8 @@
             [kotoba.kir-dequant-iq-test]
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
+            ;; fwstore: the allocation that answers with an address
+            [kotoba.kir-firmware-store-test]
             [kotoba.kir-host-stack-trap-test]
             ;; the language-owned order over an i64, which `compare` could
             ;; not compute for a bigint
@@ -43,6 +45,7 @@
              'kotoba.kir-dequant-iq-test
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
+             'kotoba.kir-firmware-store-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-i64-order-test
              'kotoba.kir-image-address-test
