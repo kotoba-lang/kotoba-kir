@@ -3455,10 +3455,16 @@
                    ;; had the problem. `rdtsc` is the machine's own cycle
                    ;; counter. `swapgs` moves a segment base this interpreter
                    ;; does not model.
-                   kernel-system-operations
-                   ;; boot: and the firmware boundary, for the strongest form
-                   ;; of the reason `kernel-in-u8` refuses.
-                   kernel-uefi-operations)
+                   ;; boot: `into` with three arguments takes the middle one
+                   ;; as a TRANSDUCER, so the two families are concatenated
+                   ;; rather than passed as two collections. Measured
+                   ;; 2026-09-02: the three-argument form reduces with a nil
+                   ;; `f` and every oracle-folded test in the suite dies with
+                   ;; a NullPointerException far from here.
+                   (concat kernel-system-operations
+                           ;; boot: the firmware boundary, for the strongest
+                           ;; form of the reason `kernel-in-u8` refuses.
+                           kernel-uefi-operations))
                   op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
