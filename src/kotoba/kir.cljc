@@ -3234,7 +3234,19 @@
                       kernel-in-u8 kernel-in-u32
                       kernel-read-msr kernel-write-msr
                       kernel-cpuid-eax kernel-cpuid-ebx
-                      kernel-cpuid-ecx kernel-cpuid-edx} op)
+                      kernel-cpuid-ecx kernel-cpuid-edx
+                      ;; simdprep: `kernel-xgetbv` reads an extended control
+                      ;; register, and refuses for a reason one step stronger
+                      ;; than `cpuid`'s. A `cpuid` result is a property of the
+                      ;; MACHINE; XCR0 is a property of the machine AND of the
+                      ;; kernel that is running on it at the moment of the
+                      ;; read -- it holds what the OS has agreed to save and
+                      ;; restore across a context switch, and a kernel that
+                      ;; has not enabled the YMM state bit yet will read a
+                      ;; different value five instructions later once it has.
+                      ;; There is no compile-time answer, and the one the
+                      ;; caller BRANCHES on is "may I use AVX2".
+                      kernel-xgetbv} op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
@@ -3509,7 +3521,17 @@
                              ;; not of the program, and must survive to run
                              ;; time no matter how constant its inputs look.
                              kernel-cpuid-eax kernel-cpuid-ebx
-                             kernel-cpuid-ecx kernel-cpuid-edx}
+                             kernel-cpuid-ecx kernel-cpuid-edx
+                             ;; simdprep: and `kernel-xgetbv`, which needs this
+                             ;; set for the same structural reason the `cpuid`
+                             ;; four do and slightly more urgently. Its only
+                             ;; real argument is the literal 0, so a
+                             ;; constant-folder sees an operation over one
+                             ;; constant with nothing about it to suggest an
+                             ;; effect. The interpreter traps rather than
+                             ;; answering, so a module missing from this set
+                             ;; does not compile at all.
+                             kernel-xgetbv}
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
         typed-values? (= :kotoba.hir/v3 (:format hir))

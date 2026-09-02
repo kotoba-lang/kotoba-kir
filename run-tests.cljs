@@ -16,6 +16,7 @@
             [kotoba.kir-document-sha256-test]
             [kotoba.kir-host-stack-trap-test]
             [kotoba.kir-kernel-memory-test]
+            [kotoba.kir-kernel-privileged-test]
             [kotoba.kir-loop-helper-tail-position-test]
             [kotoba.kir-uleb-i64-test]))
 
@@ -30,5 +31,6 @@
              'kotoba.kir-document-sha256-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-kernel-memory-test
+             'kotoba.kir-kernel-privileged-test
              'kotoba.kir-loop-helper-tail-position-test
              'kotoba.kir-uleb-i64-test)
