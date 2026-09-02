@@ -35,8 +35,18 @@
   A catalog renumbering must not move a definition's identity, and a
   definition's identity must not depend on which wire ABI a backend speaks.
 
+  Control effects are the exception, and they are the exception because there
+  is nothing to translate.  `:abort` (the typed abort ability, kotoba-lang
+  `lang/abort-ability.edn`) has no capability and no wire id: the compiler
+  emits the bare keyword, which is already the sealed vocabulary, so the
+  bridge passes it through unchanged.  It must reach the sealed row — a
+  function that can abort has interface `[:result T E]` where one that cannot
+  has `T`, and two definitions that differ in that must not share an identity.
+  The set of such keywords is closed (`control-effects`); any other keyword is
+  still refused as not a wire capability call.
+
   The bridge is `effect-row-from-hir`: it takes what the compiler reports —
-  `{:effects #{[:cap/call 8] ...} :named-operations #{:state/transact ...}}` —
+  `{:effects #{[:cap/call 8] :abort ...} :named-operations #{:state/transact ...}}` —
   and the catalog's `id->name` (kotoba-sema owns the catalog and depends on
   this repository, so the mapping is an argument, never a lookup made here),
   and returns the keyword row.  A wire id the catalog cannot name is refused
@@ -308,6 +318,29 @@
        (= :cap/call (first member))
        (some? (wire-id (second member)))))
 
+(def control-effects
+  "The CLOSED set of effect-row members the compiler emits as keywords rather
+  than as `[:cap/call <id>]`: control effects, which have no capability and no
+  wire id to name them by.
+
+  `:abort` is the typed abort ability (kotoba-lang `lang/abort-ability.edn`).
+  A function that can leave its caller by aborting carries it; one that cannot
+  does not.  That difference is semantic -- the two have different interfaces,
+  `[:result T E]` against `T` -- so it must reach the sealed row, or two
+  definitions that differ in whether they can abort would share one identity.
+
+  These pass through the bridge UNCHANGED: they are already the sealed
+  vocabulary.  There is nothing to translate, because there is no numeric ABI
+  behind them to translate from -- which is exactly why they are listed here
+  rather than looked up in the catalog.  The set is closed on purpose: a
+  keyword the compiler did not mean as a control effect is still refused with
+  `effect row member is not a wire capability call`, so widening it is a
+  contract change and not something a stray keyword can do by arriving."
+  #{:abort})
+
+(defn- bridgeable-member? [member]
+  (or (wire-call? member) (contains? control-effects member)))
+
 (defn- refuse-bridge! [message data]
   (throw (ex-info message (assoc data :problem :definition/effect-row-unbridged))))
 
@@ -318,7 +351,8 @@
   HIR is anything carrying the compiler's report -- a checked module or one of
   its functions -- and only two of its keys are read:
 
-    :effects           #{[:cap/call 8] ...}   the wire row `infer-effects` emits
+    :effects           #{[:cap/call 8] :abort} the wire row `infer-effects` emits,
+                                              control effects included
     :named-operations  #{:state/transact ...} what ability elaboration recorded
                                               (optional; provenance, see below)
 
@@ -334,8 +368,12 @@
   Fail-closed, with the reason in the message and `:problem
   :definition/effect-row-unbridged` in the ex-data:
 
-  - a member that is not `[:cap/call <integer>]` is refused: the compiler
-    never produces anything else, so anything else is not a compiler row;
+  - a member that is neither `[:cap/call <integer>]` nor a member of the
+    closed `control-effects` set is refused: the compiler never produces
+    anything else, so anything else is not a compiler row;
+  - a member of `control-effects` (today `:abort`) passes through unchanged:
+    it carries no wire id, so there is no catalog lookup to make and nothing
+    a lookup could get wrong;
   - a wire id the catalog does not name is refused with
     \"effect row wire id has no catalog name: [:cap/call N]\" -- the only
     way to reach such an id is a literal `(cap-call N x)` in source, and a
@@ -369,20 +407,23 @@
       (refuse-bridge! "catalog maps two wire ids to one operation name; the sealed row would conflate them"
                       {:duplicates (into {} (filter (fn [[_ n]] (> n 1)))
                                          (frequencies (vals catalog)))}))
-    (when-not (every? wire-call? row)
+    (when-not (every? bridgeable-member? row)
       (refuse-bridge! (str "effect row member is not a wire capability call: "
-                           (pr-str (first (remove wire-call? row))))
-                      {:member (first (remove wire-call? row)) :effects row}))
+                           (pr-str (first (remove bridgeable-member? row))))
+                      {:member (first (remove bridgeable-member? row)) :effects row}))
     (when (and (some? named) (not (and (set? named) (every? keyword? named))))
       (refuse-bridge! ":named-operations must be a set of keywords" {:named-operations named}))
     (let [translated
           (into #{}
-                (map (fn [[_ raw]]
-                       (let [id (wire-id raw)]
-                         (or (get catalog id)
-                             (refuse-bridge!
-                              (str "effect row wire id has no catalog name: [:cap/call " id "]")
-                              {:wire-id id :effects row})))))
+                (map (fn [member]
+                       (if (contains? control-effects member)
+                         ;; Already the sealed vocabulary; see `control-effects`.
+                         member
+                         (let [id (wire-id (second member))]
+                           (or (get catalog id)
+                               (refuse-bridge!
+                                (str "effect row wire id has no catalog name: [:cap/call " id "]")
+                                {:wire-id id :effects row}))))))
                 row)]
       (doseq [op (or named #{})]
         (when-not (contains? known-names op)
