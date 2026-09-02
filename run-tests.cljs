@@ -14,6 +14,8 @@
             [kotoba.kir-cljs-i64-ashr-test]
             ;; a core let takes one body form; a core if takes three parts
             [kotoba.kir-core-form-shape-test]
+            ;; dequant-iq: the four codebook formats, element by element
+            [kotoba.kir-dequant-iq-test]
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
             [kotoba.kir-host-stack-trap-test]
@@ -38,6 +40,7 @@
 
 (t/run-tests 'kotoba.kir-cljs-i64-ashr-test
              'kotoba.kir-core-form-shape-test
+             'kotoba.kir-dequant-iq-test
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
              'kotoba.kir-host-stack-trap-test
