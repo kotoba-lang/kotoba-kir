@@ -397,6 +397,57 @@
   ;; Parameters still cannot be handles, and string-index has no wire form.
   (contains? #{:vector-i64 :vector-f64} type))
 
+;; ── the floating-point heads native admits, as data ──────────────────────
+;;
+;; `kotoba-verifier` re-derives this same admitted set independently, and that
+;; independence is deliberate: being stricter there is sound, being looser is
+;; not. What is NOT sound is the two drifting apart without anyone noticing --
+;; an operation admitted here and absent there is a green `amu check` followed
+;; by `:error :verify` at compile time, which is how the f32 arm's absence was
+;; found in the first place (2026-09-02, on a program every other layer had
+;; already accepted).
+;;
+;; So the sets below are exported rather than written inline in
+;; `only-native-word-typed-features?`: they are the same values that function
+;; branches on, and `kotoba.verifier-kir-agreement-test` reads them across the
+;; repository boundary and fails naming the differing heads. Data, not a
+;; second implementation -- the verifier still decides for itself.
+(def native-f64-arithmetic-operations
+  "f64 arithmetic and bit conversions admitted for the native backends.
+  ADR-2608030300. Each takes and returns one machine word holding an IEEE-754
+  binary64 pattern."
+  '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
+     f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits})
+
+(def native-f32-arithmetic-operations
+  "binary32 arithmetic and bit conversions admitted for the native backends.
+  ADR-kotoba-floating-point-on-native. `f32-min`/`f32-max` are absent: they
+  would need an admission through seven repositories, not merely an encoding
+  (kotoba-native's `x86-f64-min-max` shows the corrected x86 sequence)."
+  '#{f32-add f32-sub f32-mul f32-div
+     f32-abs f32-neg f32-sqrt f32-from-bits f32-to-bits})
+
+(def native-float-width-conversions
+  "The four width conversions on which both ISAs and this interpreter agree for
+  EVERY input. The `-checked` and truncating float->int families are refused."
+  '#{f32-to-f64-exact f64-to-f32-rounded
+     i64-to-f32-rounded i64-to-f64-rounded})
+
+(def native-f64-comparison-operations
+  '#{f64-eq f64-lt f64-le f64-gt f64-ge f64-unordered})
+
+(def native-f32-comparison-operations
+  '#{f32-eq f32-lt f32-le f32-gt f32-ge f32-unordered})
+
+(def native-floating-point-operations
+  "Every floating-point head `only-native-word-typed-features?` admits for a
+  native target. The agreement check in kotoba-verifier compares against this."
+  (into #{} cat [native-f64-arithmetic-operations
+                 native-f32-arithmetic-operations
+                 native-float-width-conversions
+                 native-f64-comparison-operations
+                 native-f32-comparison-operations]))
+
 (defn only-native-word-typed-features? [hir]
   (letfn [(walk [form]
             (cond
@@ -496,9 +547,7 @@
                   ;; representation, only i64 words -- here carrying an
                   ;; IEEE-754 bit pattern. Both native ISAs emit these
                   ;; directly.
-                  (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max
-                                f64-abs f64-neg f64-sqrt f64-from-bits f64-to-bits}
-                             op)
+                  (contains? native-f64-arithmetic-operations op)
                   (every? walk args)
                   ;; f32: binary32 arithmetic on native
                   ;; (ADR-kotoba-floating-point-on-native). Same admission
@@ -512,20 +561,22 @@
                   ;; u32 (what `kernel-load-u32` returns) into the same word a
                   ;; signed i32 already is.
                   ;;
-                  ;; `f32-min`/`f32-max` are deliberately NOT here, and this is
-                  ;; the one place the f32 family is narrower than the f64 one.
-                  ;; x86's MINSS/MAXSS return the SECOND operand when either
-                  ;; input is NaN; AArch64's FMIN/FMAX return the NaN; and this
-                  ;; interpreter -- the definition -- uses Math/min, which also
-                  ;; returns the NaN. So the f64 line above admits two
-                  ;; operations on which x86 already disagrees with both the
-                  ;; other ISA and the oracle. That is a pre-existing defect
-                  ;; (recorded, not repaired here, because repairing it moves
-                  ;; f64 goldens); this slice declines to duplicate it into a
-                  ;; second width.
-                  (contains? '#{f32-add f32-sub f32-mul f32-div
-                                f32-abs f32-neg f32-sqrt f32-from-bits f32-to-bits}
-                             op)
+                  ;; `f32-min`/`f32-max` are still NOT here, but the reason is
+                  ;; no longer the one this comment used to give. It said x86's
+                  ;; MINSS/MAXSS return the SECOND operand when either input is
+                  ;; NaN while AArch64's FMIN/FMAX and this interpreter's
+                  ;; Math/min return the NaN, and that the f64 line above
+                  ;; therefore admitted a disagreement. That defect was real --
+                  ;; executed under Rosetta on 2026-09-02 it cost six of twelve
+                  ;; NaN/signed-zero rows -- and it is now repaired in
+                  ;; kotoba-native (`x86-f64-min-max`), whose corrected sequence
+                  ;; transfers to binary32 unchanged.
+                  ;;
+                  ;; What is missing is an admission, not an encoding:
+                  ;; `f32-min`/`f32-max` would have to travel kir -> sema ->
+                  ;; gmir -> mir -> codegen -> verifier -> native. That is a
+                  ;; slice of its own.
+                  (contains? native-f32-arithmetic-operations op)
                   (every? walk args)
                   ;; Width conversions. Only the ones on which both ISAs and
                   ;; this interpreter agree for EVERY input:
@@ -547,9 +598,7 @@
                   ;; indefinite value (INT64_MIN), AArch64 FCVTZS saturates, and
                   ;; this interpreter traps. Making them agree needs an emitted
                   ;; domain check, which is a separate increment.
-                  (contains? '#{f32-to-f64-exact f64-to-f32-rounded
-                                i64-to-f32-rounded i64-to-f64-rounded}
-                             op)
+                  (contains? native-float-width-conversions op)
                   (and (= 1 (count args)) (walk (first args)))
                   ;; f64 comparisons. These DO produce a genuine `:bool`-typed
                   ;; value, which the `true`/`false` comment above says only a
@@ -557,15 +606,13 @@
                   ;; native. It needs no new representation: the backends emit
                   ;; the same compare-and-set-flag pair the integer
                   ;; comparisons already do, into the same 0/1 word.
-                  (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge
-                                f64-unordered} op)
+                  (contains? native-f64-comparison-operations op)
                   (and (= 2 (count args)) (every? walk args))
                   ;; f32 comparisons. Identical shape to the f64 line above:
                   ;; a compare-and-setcc pair into the same 0/1 word, over the
                   ;; single-precision compare (UCOMISS / FCMP s) instead of the
                   ;; double one. Unordered handling is the f64 path's, unchanged.
-                  (contains? '#{f32-eq f32-lt f32-le f32-gt f32-ge
-                                f32-unordered} op)
+                  (contains? native-f32-comparison-operations op)
                   (and (= 2 (count args)) (every? walk args))
                   ;; Keyword OPERATIONS, which `native-word-field-types`'s
                   ;; comment listed as needing a general substring and

@@ -18,17 +18,20 @@
 
   What is NOT here, and why, is as load-bearing as what is:
 
-    f32-min / f32-max         admitted for f64, refused for f32. x86 MINSS
-                              returns the SECOND operand when either input is
-                              NaN; AArch64 FMIN and this interpreter return the
-                              NaN. The f64 line already carries that
-                              disagreement; this width declines to inherit it.
+    f32-min / f32-max         admitted for f64, refused for f32. The reason is
+                              no longer that the f64 line already carries the
+                              x86 NaN disagreement -- kotoba-native repaired
+                              that (`x86-f64-min-max`) on 2026-09-02, and the
+                              corrected sequence transfers to binary32
+                              unchanged. What is missing is an admission
+                              through seven repositories, not an encoding.
     *-checked conversions     trap here on inexactness; no backend emits the
                               check.
     *-to-i64-truncating       three answers on an out-of-domain input: x86
                               yields INT64_MIN, AArch64 saturates, this
                               interpreter traps."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
             [kotoba.test-hir :as test-hir]))
@@ -96,6 +99,39 @@
       (is (false? (kir/only-native-word-typed-features?
                    (hir (list 'f32-add form '(f32-from-bits 0)))))
           "nor must nesting it inside an admitted f32 operation"))))
+
+(deftest the-exported-admission-list-is-the-one-the-gate-uses
+  ;; `native-floating-point-operations` is what kotoba-verifier's agreement
+  ;; test compares against, so it has to be the set this gate actually admits
+  ;; and not a description of it kept alongside. Both directions, and a floor:
+  ;; an empty set would make the agreement check pass by saying nothing.
+  (testing "every exported head is admitted"
+    (is (<= 30 (count kir/native-floating-point-operations))
+        "SCANNED floor -- an empty or truncated set is never a pass")
+    (doseq [op (sort kir/native-floating-point-operations)]
+      (let [arity (cond (contains? kir/native-f64-comparison-operations op) 2
+                        (contains? kir/native-f32-comparison-operations op) 2
+                        (contains? kir/native-float-width-conversions op) 1
+                        (contains? '#{f64-from-bits f64-to-bits f64-abs f64-neg
+                                      f64-sqrt f32-from-bits f32-to-bits
+                                      f32-abs f32-neg f32-sqrt} op) 1
+                        :else 2)
+            arg (if (str/starts-with? (name op) "i64") 1 '(f64-from-bits 1))
+            form (cons op (repeat arity arg))]
+        (is (true? (kir/only-native-word-typed-features? (hir form)))
+            (str op " is exported but not admitted")))))
+  (testing "the two heads the list deliberately omits stay omitted"
+    (is (not (contains? kir/native-floating-point-operations 'f32-min)))
+    (is (not (contains? kir/native-floating-point-operations 'f32-max)))
+    (is (contains? kir/native-floating-point-operations 'f64-min))
+    (is (contains? kir/native-floating-point-operations 'f64-max)))
+  (testing "the union is exactly the five parts, with no member counted twice"
+    (is (= (count kir/native-floating-point-operations)
+           (+ (count kir/native-f64-arithmetic-operations)
+              (count kir/native-f32-arithmetic-operations)
+              (count kir/native-float-width-conversions)
+              (count kir/native-f64-comparison-operations)
+              (count kir/native-f32-comparison-operations))))))
 
 (deftest f32-arity-is-checked-not-assumed
   ;; The gate walks `args` generically for the arithmetic family, so the
