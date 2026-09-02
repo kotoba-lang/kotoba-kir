@@ -1696,7 +1696,27 @@
      ;; `HandleProtocol`, `GetMemoryMap`, `OpenProtocol`. They refuse here for
      ;; exactly the reason `kernel-uefi-call2` does; the arity is the only
      ;; thing that differs, and it is the backend's business.
-     kernel-uefi-call4 kernel-uefi-call6})
+     kernel-uefi-call4 kernel-uefi-call6
+     ;; fwstore: the allocation that answers with an address (kotoba-gmir
+     ;; ADR-0030). It refuses here for BOTH of the two reasons already in this
+     ;; set at once, which is why it belongs in it and not beside it.
+     ;;
+     ;; It runs the firmware's own `AllocatePages`, exactly as
+     ;; `kernel-uefi-call4` runs whatever the slot names -- there is no
+     ;; firmware here to run. And what it answers with is a PHYSICAL PAGE
+     ;; ADDRESS: any number this interpreter invented for it would be a number
+     ;; the caller then declares a window over and writes through. The
+     ;; privileged refusal (`:kernel-privileged-unavailable`) is the right one
+     ;; for both.
+     ;;
+     ;; A caller might reasonably expect the failure answer -- zero -- to be
+     ;; available here, since "this machine has no firmware, so nothing was
+     ;; allocated" is arguably true. It is not offered. Folding it would turn
+     ;; a program's allocation into a compile-time null and every access
+     ;; through it into a trap the source never wrote, and the difference
+     ;; between "refused to answer" and "answered zero" is exactly the
+     ;; difference between a compile that stops and one that ships.
+     kernel-uefi-alloc-region})
 ;; boot: end
 
 ;; boot-lit: read-only literals (kotoba-gmir ADR-0011).

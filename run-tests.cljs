@@ -18,6 +18,8 @@
             [kotoba.kir-dequant-iq-test]
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
+            ;; fwstore: the allocation that answers with an address
+            [kotoba.kir-firmware-store-test]
             ;; fuel64: the ceiling exists because of what a double does to the
             ;; counter, so this one has to run HERE and not only on the JVM
             [kotoba.kir-fuel64-test]
@@ -46,6 +48,7 @@
              'kotoba.kir-dequant-iq-test
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
+             'kotoba.kir-firmware-store-test
              'kotoba.kir-fuel64-test
              'kotoba.kir-host-stack-trap-test
              'kotoba.kir-i64-order-test
