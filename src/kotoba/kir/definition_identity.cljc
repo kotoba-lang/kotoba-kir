@@ -335,7 +335,18 @@
   rather than looked up in the catalog.  The set is closed on purpose: a
   keyword the compiler did not mean as a control effect is still refused with
   `effect row member is not a wire capability call`, so widening it is a
-  contract change and not something a stray keyword can do by arriving."
+  contract change and not something a stray keyword can do by arriving.
+
+  PUBLIC SO IT CAN BE COMPARED, NOT SO IT CAN BE IMPORTED (ADR-0266).  amu's
+  `kotoba.compiler.definition-identity-test/the-sealed-control-effect-vocabulary-agrees-across-the-pin`
+  derives its OWN expectation and asserts equality with this set across its
+  `deps.edn` pin.  A consumer that imported this instead would agree by
+  construction and prove nothing.  The comparison exists because the absence
+  of one cost a day: on 2026-09-02 this commit and amu ADR-0300 section 4
+  decided the same question in opposite directions, and amu's pin sat one
+  commit short of here until kotoba-lang adjudicated
+  (`docs/adr/ADR-abort-reaches-the-sealed-effect-row.md`, in this repository's
+  favour)."
   #{:abort})
 
 (defn- bridgeable-member? [member]
