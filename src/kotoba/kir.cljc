@@ -9,6 +9,7 @@
   (:require [clojure.string :as str]
             [kotoba.hir :as hir]
             [kotoba.kir.value :as value]
+            [kotoba.kir.iq-codebook :as iq]
             [kotoba.kir.decimal :as decimal]
             [kotoba.kir.xml :as xml]
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
@@ -1755,7 +1756,14 @@
   `sizeof(block_*)`; `:block-elements` is that format's QK."
   '{kernel-dequant-dot-q8-0 {:block-bytes 34  :block-elements 32}
     kernel-dequant-dot-q4-k {:block-bytes 144 :block-elements 256}
-    kernel-dequant-dot-q6-k {:block-bytes 210 :block-elements 256}})
+    kernel-dequant-dot-q6-k {:block-bytes 210 :block-elements 256}
+    ;; dequant-iq: the four codebook formats. A code here is an INDEX INTO A
+    ;; TABLE that belongs to the format, so this oracle carries the tables
+    ;; (`kotoba.kir.iq-codebook`) as well as the equations.
+    kernel-dequant-dot-iq4-xs {:block-bytes 136 :block-elements 256}
+    kernel-dequant-dot-iq2-s {:block-bytes 82 :block-elements 256}
+    kernel-dequant-dot-iq3-xxs {:block-bytes 98 :block-elements 256}
+    kernel-dequant-dot-iq3-s {:block-bytes 110 :block-elements 256}})
 
 (def ^:private kernel-dequant-dot-operations
   (set (keys kernel-dequant-dot-formats)))
@@ -2380,6 +2388,16 @@
 (defn- image-u16 [image slot]
   (+ (nth image slot) (* 256 (nth image (+ slot 1)))))
 
+(defn- image-u32
+  "Four little-endian bytes as an UNSIGNED integer. IQ3_XXS packs a four-bit
+  scale and four seven-bit sign selectors into one 32-bit word, and the top
+  nibble of it is above 2^31, so this may not go through a signed read."
+  [image slot]
+  (+ (nth image slot)
+     (* 256 (nth image (+ slot 1)))
+     (* 65536 (nth image (+ slot 2)))
+     (* 16777216 (nth image (+ slot 3)))))
+
 (defn- image-f32
   "Four little-endian bytes as a host f32. This is the ACTIVATION side, which
   is plain binary32 in memory."
@@ -2482,7 +2500,174 @@
                    (assoc! (+ (* 128 n) l 96)
                            (as-f32 (* (scale 3) (nibble b1 6)))))))
            acc (range 32)))
-        out (range 2))))))
+        out (range 2))))
+
+    ;; dequant-iq: the four codebook formats. `dequantize_row_iq*` in
+    ;; `qwen35_quant.c`, transcribed with its own pointer walk. A code here
+    ;; INDEXES A TABLE (`kotoba.kir.iq-codebook`) rather than being a number,
+    ;; and three of the four also carry a per-element SIGN that the value in
+    ;; the table does not.
+    ;;
+    ;; Multiplying by `-1.f` is exact, so the C's
+    ;; `dl * grid[j] * (signs & mask ? -1.f : 1.f)` is the negation of one
+    ;; rounded product and is written that way.
+
+    kernel-dequant-dot-iq4-xs
+    ;; `d`, a sixteen-bit `scales_h`, four packed low nibbles, 128 nibble
+    ;; pairs. Sixteen elements from the low nibbles of sixteen bytes and
+    ;; sixteen from their high nibbles, per 32-element group -- so the two
+    ;; halves are 16 apart in the output, not 32 as in Q4_K.
+    ;;
+    ;; The six-bit scale is assembled from a nibble of `scales_l` and two bits
+    ;; of `scales_h`, then BIASED BY -32 as an integer before it meets `d`.
+    (let [d (dequant-half image slot)
+          scales-h (image-u16 image (+ slot 2))
+          scales-l (+ slot 4)
+          qs (+ slot 8)
+          out (transient (vec (repeat 256 (as-f32 0))))]
+      (persistent!
+       (reduce
+        (fn [acc ib]
+          (let [ls (bit-or (bit-and (bit-shift-right (image-u8 image (+ scales-l (quot ib 2)))
+                                                     (* 4 (mod ib 2)))
+                                    0xF)
+                           (bit-shift-left (bit-and (bit-shift-right scales-h (* 2 ib)) 3) 4))
+                dl (as-f32 (* d (- ls 32)))
+                base (+ qs (* 16 ib))]
+            (reduce
+             (fn [acc j]
+               (let [byte (image-u8 image (+ base j))]
+                 (-> acc
+                     (assoc! (+ (* 32 ib) j)
+                             (as-f32 (* dl (nth iq/kvalues-iq4nl (bit-and byte 0xF)))))
+                     (assoc! (+ (* 32 ib) j 16)
+                             (as-f32 (* dl (nth iq/kvalues-iq4nl (bit-shift-right byte 4))))))))
+             acc (range 16))))
+        out (range 8))))
+
+    kernel-dequant-dot-iq2-s
+    ;; `d`, 32 code bytes, 32 sign bytes (the same array, offset by 32), eight
+    ;; two-bit-extension bytes, eight packed scale pairs. The grid index is
+    ;; ten bits: eight from `qs` and two lifted out of `qh` by a shift that
+    ;; depends on which quarter of the group is being read.
+    (let [d (dequant-half image slot)
+          qs (+ slot 2)
+          signs (+ slot 34)
+          qh (+ slot 66)
+          scales (+ slot 74)
+          out (transient (vec (repeat 256 (as-f32 0))))]
+      (persistent!
+       (reduce
+        (fn [acc ib32]
+          (let [scale (image-u8 image (+ scales ib32))
+                db0 (as-f32 (* (as-f32 (* d (as-f32 (+ 0.5 (bit-and scale 0xF)))))
+                               (as-f32 0.25)))
+                db1 (as-f32 (* (as-f32 (* d (as-f32 (+ 0.5 (bit-shift-right scale 4)))))
+                               (as-f32 0.25)))
+                high (image-u8 image (+ qh ib32))]
+            (reduce
+             (fn [acc l]
+               (let [dl (if (< l 2) db0 db1)
+                     index (bit-or (image-u8 image (+ qs (* 4 ib32) l))
+                                   (bit-and (bit-shift-left high (- 8 (* 2 l))) 0x300))
+                     grid (* 8 index)
+                     sign (image-u8 image (+ signs (* 4 ib32) l))]
+                 (reduce
+                  (fn [acc j]
+                    (let [value (as-f32 (* dl (nth iq/iq2s-grid (+ grid j))))]
+                      (assoc! acc (+ (* 32 ib32) (* 8 l) j)
+                              (if (pos? (bit-and sign (nth iq/kmask-iq2xs j)))
+                                (as-f32 (- value))
+                                value))))
+                  acc (range 8))))
+             acc (range 4))))
+        out (range 8))))
+
+    kernel-dequant-dot-iq3-xxs
+    ;; `d` and 96 bytes: 64 codes, then eight 32-bit words each carrying a
+    ;; four-bit scale in its top nibble and four SEVEN-BIT sign selectors
+    ;; below it. The selector is expanded through `ksigns_iq2xs`; the other
+    ;; three formats store the eight sign bits directly.
+    (let [d (dequant-half image slot)
+          qs (+ slot 2)
+          aux (+ slot 66)
+          out (transient (vec (repeat 256 (as-f32 0))))]
+      (persistent!
+       (reduce
+        (fn [acc ib32]
+          (let [aux32 (image-u32 image (+ aux (* 4 ib32)))
+                db (as-f32 (* (as-f32 (* d (as-f32 (+ 0.5 (quot aux32 268435456)))))
+                              (as-f32 0.5)))]
+            (reduce
+             (fn [acc l]
+               (let [selector (bit-and (quot aux32 (bit-shift-left 1 (* 7 l))) 127)
+                     sign (nth iq/ksigns-iq2xs selector)
+                     grid1 (* 4 (image-u8 image (+ qs (* 8 ib32) (* 2 l))))
+                     grid2 (* 4 (image-u8 image (+ qs (* 8 ib32) (* 2 l) 1)))
+                     at (+ (* 32 ib32) (* 8 l))]
+                 (reduce
+                  (fn [acc j]
+                    (let [low (as-f32 (* db (nth iq/iq3xxs-grid (+ grid1 j))))
+                          high (as-f32 (* db (nth iq/iq3xxs-grid (+ grid2 j))))]
+                      (-> acc
+                          (assoc! (+ at j)
+                                  (if (pos? (bit-and sign (nth iq/kmask-iq2xs j)))
+                                    (as-f32 (- low)) low))
+                          (assoc! (+ at j 4)
+                                  (if (pos? (bit-and sign (nth iq/kmask-iq2xs (+ j 4))))
+                                    (as-f32 (- high)) high)))))
+                  acc (range 4))))
+             acc (range 4))))
+        out (range 8))))
+
+    kernel-dequant-dot-iq3-s
+    ;; `d`, 64 codes, eight ninth-bit bytes, 32 sign bytes, four packed scale
+    ;; pairs. The C walks TWO 32-element groups per turn of its outer loop --
+    ;; `ib32 += 2` -- because one `qh` byte serves each and one scale byte
+    ;; serves both, so the transcription below does the same rather than
+    ;; flattening it.
+    (let [d (dequant-half image slot)
+          qs (+ slot 2)
+          qh (+ slot 66)
+          signs (+ slot 74)
+          scales (+ slot 106)
+          out (transient (vec (repeat 256 (as-f32 0))))]
+      (persistent!
+       (reduce
+        (fn [acc pair]
+          (let [scale (image-u8 image (+ scales pair))
+                db1 (as-f32 (* d (+ 1 (* 2 (bit-and scale 0xF)))))
+                db2 (as-f32 (* d (+ 1 (* 2 (bit-shift-right scale 4)))))]
+            (reduce
+             (fn [acc half]
+               (let [db (if (zero? half) db1 db2)
+                     ninth (image-u8 image (+ qh (* 2 pair) half))
+                     code (+ qs (* 16 pair) (* 8 half))
+                     sign-base (+ signs (* 8 pair) (* 4 half))
+                     at0 (+ (* 64 pair) (* 32 half))]
+                 (reduce
+                  (fn [acc l]
+                    (let [g1 (* 4 (bit-or (image-u8 image (+ code (* 2 l)))
+                                          (bit-and (bit-shift-left ninth (- 8 (* 2 l))) 256)))
+                          g2 (* 4 (bit-or (image-u8 image (+ code (* 2 l) 1))
+                                          (bit-and (bit-shift-left ninth (- 7 (* 2 l))) 256)))
+                          sign (image-u8 image (+ sign-base l))
+                          at (+ at0 (* 8 l))]
+                      (reduce
+                       (fn [acc j]
+                         (let [low (as-f32 (* db (nth iq/iq3s-grid (+ g1 j))))
+                               high (as-f32 (* db (nth iq/iq3s-grid (+ g2 j))))]
+                           (-> acc
+                               (assoc! (+ at j)
+                                       (if (pos? (bit-and sign (nth iq/kmask-iq2xs j)))
+                                         (as-f32 (- low)) low))
+                               (assoc! (+ at j 4)
+                                       (if (pos? (bit-and sign (nth iq/kmask-iq2xs (+ j 4))))
+                                         (as-f32 (- high)) high)))))
+                       acc (range 4))))
+                  acc (range 4))))
+             acc (range 2))))
+        out (range 4))))))
 
 (defn- kernel-dequant-dot-checks!
   "The seven checks the emitter emits, in the emitter's order, so a program
