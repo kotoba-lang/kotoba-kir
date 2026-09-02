@@ -567,8 +567,10 @@
                   ;; NaN while AArch64's FMIN/FMAX and this interpreter's
                   ;; Math/min return the NaN, and that the f64 line above
                   ;; therefore admitted a disagreement. That defect was real --
-                  ;; executed under Rosetta on 2026-09-02 it cost six of twelve
-                  ;; NaN/signed-zero rows -- and it is now repaired in
+                  ;; executed under Rosetta on 2026-09-02 it cost six of the
+                  ;; eighteen NaN/signed-zero rows on x86-64, with AArch64 right
+                  ;; on all twenty-four of its observations -- and it is now
+                  ;; repaired in
                   ;; kotoba-native (`x86-f64-min-max`), whose corrected sequence
                   ;; transfers to binary32 unchanged.
                   ;;
