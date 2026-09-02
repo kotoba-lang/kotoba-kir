@@ -142,6 +142,34 @@
     (is (= #{} (identity/effect-row-from-hir {:effects #{} :named-operations #{}}
                                              {:id->name catalog})))))
 
+(deftest control-effects-pass-through-the-bridge-unchanged
+  (testing "(h) `:abort` carries no wire id, so the bridge has nothing to
+            translate and passes the keyword straight into the sealed row"
+    (is (= #{:abort}
+           (identity/effect-row-from-hir {:effects #{:abort}} {:id->name catalog})))
+    (is (= #{:abort :state/transact}
+           (identity/effect-row-from-hir {:effects #{:abort [:cap/call 8]}
+                                          :named-operations #{:state/transact}}
+                                         {:id->name catalog}))))
+  (testing "(i) the bridged row is a valid sealed row and gets a CID"
+    (let [row (identity/effect-row-from-hir {:effects #{:abort}} {:id->name catalog})]
+      (is (nil? (identity/definition-error
+                 (assoc vector-definition :definition/effect-row row))))))
+  (testing "(j) aborting and non-aborting definitions get DIFFERENT identities:
+            that is the whole reason the keyword must survive the bridge"
+    (let [aborting (assoc vector-definition :definition/effect-row
+                          (identity/effect-row-from-hir {:effects #{:abort}} {:id->name catalog}))
+          pure (assoc vector-definition :definition/effect-row
+                      (identity/effect-row-from-hir {:effects #{}} {:id->name catalog}))]
+      (is (not= (identity/definition-cid aborting) (identity/definition-cid pure)))))
+  (testing "(k) the set is closed: a keyword that is not a control effect is
+            still refused as not a wire capability call"
+    (is (= #{:abort} identity/control-effects))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"not a wire capability call"
+         (identity/effect-row-from-hir {:effects #{:not/a-control-effect}}
+                                       {:id->name catalog})))))
+
 (defn- bridge-failure [hir opts]
   (try (identity/effect-row-from-hir hir opts)
        nil
@@ -184,6 +212,9 @@
   "test/kotoba/kir/fixtures/code-identity-vectors.edn")
 
 (deftest every-frozen-vector-is-byte-identical-after-the-bridge
+  ;; Re-asserted when the bridge learned `:abort` (2026-09-02): admitting a new
+  ;; member SHAPE must not move a byte of any row that never had one. The
+  ;; encoding was not touched; this is what says so rather than believing it.
   (let [table (edn/read-string (slurp (io/file frozen-vectors-file)))]
     (is (= identity/payload-version (:payload-version table)))
     (is (= 10 (count (:vectors table))) "the copied table is the 10-vector table")
