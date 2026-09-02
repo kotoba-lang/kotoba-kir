@@ -85,4 +85,8 @@
     (testing label
       (is (nil? (oracle-value body)) label)))
   (testing "a module naming neither IS folded -- so the nils above are the flag"
-    (is (= 7 (oracle-value 7)))))
+    ;; An i64 is a `long` on the JVM and a BigInt on ClojureScript, and
+    ;; `(= 7 (js/BigInt 7))` is false. Caught only by running the nbb suite --
+    ;; the JVM branch was green, which is the same asymmetry ADR-0235 records
+    ;; for `bytes-literal-length`.
+    (is (= #?(:clj 7 :cljs (js/BigInt 7)) (oracle-value 7)))))

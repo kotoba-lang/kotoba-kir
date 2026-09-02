@@ -43,6 +43,16 @@ The observable consequence is that `lower` seals no `:oracle-value`, which is
 what the suite asserts -- with a control module naming neither head that IS
 folded, so the two nils are the flag and not the absence of an entry.
 
+## A defect this ADR records because ADR-0235 recorded its twin
+
+The control assertion -- a module naming neither head IS folded, so the two
+nils above are the flag rather than the absence of an entry -- compared the
+sealed oracle against the literal `7`. On the JVM an i64 is a `long` and that
+is true; on ClojureScript it is a BigInt and `(= 7 (js/BigInt 7))` is false.
+The JVM branch was green. Caught by running the nbb suite, which is exactly
+how ADR-0235 found the same asymmetry in `bytes-literal-length`'s answer, one
+layer away and in the opposite direction.
+
 ## Consequences
 
 - `bytes-literal-length` remains the one head in this area with an answer, for
