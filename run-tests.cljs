@@ -18,6 +18,7 @@
             [kotoba.kir-kernel-memory-test]
             [kotoba.kir-kernel-privileged-test]
             [kotoba.kir-loop-helper-tail-position-test]
+            [kotoba.kir-rodata-literal-test]
             [kotoba.kir-uleb-i64-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
@@ -33,4 +34,5 @@
              'kotoba.kir-kernel-memory-test
              'kotoba.kir-kernel-privileged-test
              'kotoba.kir-loop-helper-tail-position-test
+             'kotoba.kir-rodata-literal-test
              'kotoba.kir-uleb-i64-test)
