@@ -237,3 +237,161 @@
   (let [data (trapped #(run try-lock [4096 4 0] {}))]
     (is (= :kernel-memory-unavailable (:trap data)))
     (is (= 'kernel-try-lock-u32 (:operation data)))))
+
+;; ---------------------------------------------------------------------------
+;; memwidth: the two remaining MMIO widths, the missing window tiers, and the
+;; ADR 0285 slice family.
+;;
+;; Everything below is about agreement with `kotoba.native.machine-ir`'s
+;; `x86-kernel-bounds-check` / `x86-slice-bounds-check` and their AArch64
+;; twins, in the order those emit their checks. A disagreement here is a
+;; disagreement about what the machine does, not about what a memory model
+;; ought to do.
+;; ---------------------------------------------------------------------------
+
+(def ^:private load-u16 (module '[base length index] '(kernel-load-u16 base length index)))
+(def ^:private store-u16 (module '[base length index value]
+                                 '(kernel-store-u16 base length index value)))
+(def ^:private load-u64 (module '[base length index] '(kernel-load-u64 base length index)))
+(def ^:private store-u64 (module '[base length index value]
+                                 '(kernel-store-u64 base length index value)))
+(def ^:private store-u8-16k (module '[base length index value]
+                                    '(kernel-store-u8-16k base length index value)))
+(def ^:private load-u32-64k (module '[base length index]
+                                    '(kernel-load-u32-64k base length index)))
+(def ^:private slice-load-u8 (module '[base length index]
+                                     '(slice-load-u8 base length index)))
+(def ^:private slice-load-u32 (module '[base length index]
+                                      '(slice-load-u32 base length index)))
+(def ^:private slice-load-u64 (module '[base length index]
+                                      '(slice-load-u64 base length index)))
+(def ^:private slice-store-u32 (module '[base length index value]
+                                       '(slice-store-u32 base length index value)))
+
+(deftest wider-loads-are-little-endian-and-zero-extended
+  (let [mem (image 4096 [0x11 0x22 0x33 0x44 0x55 0x66 0x77 0x88])]
+    (is (= 0x2211 (w (run load-u16 [4096 8 0] {:memory mem}))))
+    (is (= 0x4433 (w (run load-u16 [4096 8 2] {:memory mem}))))
+    (is (= 0x44332211 (w (run load-u32 [4096 8 0] {:memory mem})))))
+  ;; u64 fills the whole word, so the value is checked as a string rather than
+  ;; through `w`, which narrows on ClojureScript.
+  (let [mem (image 4096 [0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff])]
+    (is (= "-1" (str (run load-u64 [4096 8 0] {:memory mem})))))
+  (let [mem (image 4096 [0x01 0x00 0x00 0x00 0x00 0x00 0x00 0x00])]
+    (is (= "1" (str (run load-u64 [4096 8 0] {:memory mem}))))))
+
+(deftest wider-stores-write-every-byte-and-return-the-value
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])]
+    (is (= 0x1234 (w (run store-u16 [4096 8 2 0x1234] {:memory mem}))))
+    (is (= [0 0 0x34 0x12 0 0 0 0] @(:bytes mem))))
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])]
+    (run store-u64 [4096 8 0 258] {:memory mem})
+    (is (= [2 1 0 0 0 0 0 0] @(:bytes mem)))))
+
+(deftest a-tier-that-only-one-member-of-a-family-had-now-works
+  ;; `kernel-store-u8-16k` did not exist: `kernel-load-u8-16k` did, and the
+  ;; store's own validation clause refused 16384. `kernel-load-u32` was pinned
+  ;; to 512, so a 64 KiB window could not be read four bytes at a time.
+  (let [mem (image 4096 (vec (repeat 8 0)))]
+    (is (= 7 (w (run store-u8-16k [4096 8 1 7] {:memory mem}))))
+    (is (= 7 (nth @(:bytes mem) 1))))
+  (let [mem (image 4096 [1 0 0 0 0 0 0 0])]
+    (is (= 1 (w (run load-u32-64k [4096 8 0] {:memory mem})))))
+  ;; and the tier is still a ceiling: a length above it traps before anything
+  ;; is read.
+  (let [data (trapped #(run load-u32-64k [4096 65537 0] {:memory (image 4096 [0 0 0 0])}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :length-above-profile-maximum (:check data)))))
+
+(deftest a-wide-access-must-fit-and-must-be-aligned
+  (let [mem (image 4096 [0 0 0 0 0 0 0 0])]
+    ;; The tail check, named by its own width so the u32 literal two tests
+    ;; above it cannot move under it.
+    (let [data (trapped #(run load-u16 [4096 3 2] {:memory mem}))]
+      (is (= :kernel-memory-fault (:trap data)))
+      (is (= :two-byte-access-outside-window (:check data))))
+    (let [data (trapped #(run load-u64 [4096 8 4] {:memory mem}))]
+      (is (= :eight-byte-access-outside-window (:check data))))
+    ;; The alignment check, which is LAST: an index that is both misaligned
+    ;; and outside the window reports the window.
+    (let [data (trapped #(run load-u16 [4096 8 1] {:memory mem}))]
+      (is (= :kernel-memory-fault (:trap data)))
+      (is (= :misaligned-access (:check data)))
+      (is (= 2 (w (:width data)))))
+    (let [data (trapped #(run load-u64 [4096 8 3] {:memory mem}))]
+      (is (= :eight-byte-access-outside-window (:check data))
+          "an access that is both misaligned and past the tail reports the tail"))
+    (let [data (trapped #(run store-u16 [4096 8 5 1] {:memory mem}))]
+      (is (= :misaligned-access (:check data))))))
+
+(deftest the-legacy-u32-pair-keeps-its-unaligned-contract
+  ;; `kernel-load-u32`/`kernel-store-u32` and the lock pair predate the
+  ;; alignment rule. Retrofitting it would change the bytes of shipped aiueos
+  ;; objects, so the asymmetry is pinned here rather than smoothed over: if a
+  ;; later change closes it, this test is what says so out loud.
+  (let [mem (image 4096 [0 1 2 3 4 5 6 7])]
+    (is (= 0x04030201 (w (run load-u32 [4096 8 1] {:memory mem})))
+        "an unaligned u32 read is still admitted")
+    (is (= 3 (w (run store-u32 [4096 8 1 3] {:memory mem}))))))
+
+;; --- the slice family ------------------------------------------------------
+
+(deftest a-slice-index-counts-elements-not-bytes
+  (let [mem (image 4096 [0x11 0x22 0x33 0x44 0x55 0x66 0x77 0x88])]
+    ;; length is 2 ELEMENTS of four bytes, and index 1 addresses byte 4.
+    (is (= 0x88776655 (w (run slice-load-u32 [4096 2 1] {:memory mem}))))
+    (is (= 0x44332211 (w (run slice-load-u32 [4096 2 0] {:memory mem}))))
+    ;; the same bytes as one 8-byte element
+    (is (= "-8613303245920329199"
+           (str (run slice-load-u64 [4096 1 0] {:memory mem}))))))
+
+(deftest a-slice-store-scales-the-index-too
+  (let [mem (image 4096 (vec (repeat 8 0)))]
+    (is (= 0x01020304 (w (run slice-store-u32 [4096 2 1 0x01020304] {:memory mem}))))
+    (is (= [0 0 0 0 4 3 2 1] @(:bytes mem)))))
+
+(deftest a-slice-traps-at-index-equal-to-length
+  ;; The single unsigned compare that is the whole per-element cost of the
+  ;; carrier. `index == length` is the first index outside.
+  (let [mem (image 4096 [1 2 3 4])
+        data (trapped #(run slice-load-u8 [4096 4 4] {:memory mem}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :index-outside-slice (:check data)))
+    (is (= 'slice-load-u8 (:operation data))))
+  ;; and one below it does not
+  (is (= 4 (w (run slice-load-u8 [4096 4 3] {:memory (image 4096 [1 2 3 4])})))))
+
+(deftest a-slice-ceiling-is-the-address-space-not-the-vector-arena
+  ;; The point of ADR 0285: 16384 is not this carrier's ceiling. A length far
+  ;; above `vector-item-limit` is admitted, and only 2^40 refuses.
+  (let [mem (image 4096 [7 0 0 0])]
+    (is (= 7 (w (run slice-load-u8 [4096 1000000 0] {:memory mem})))
+        "a million-element slice is admitted where a vector would not be")
+    (let [data (trapped #(run slice-load-u8 [4096 1099511627777 0] {:memory mem}))]
+      (is (= :kernel-memory-fault (:trap data)))
+      (is (= :length-above-slice-limit (:check data))))))
+
+(deftest a-slice-proves-alignment-once-on-the-base
+  ;; A scaled index off an aligned base is aligned, so the per-element check
+  ;; the window family pays is not paid here -- the base carries it.
+  (let [mem (image 4098 [0 0 0 0 0 0 0 0])
+        data (trapped #(run slice-load-u32 [4098 2 0] {:memory mem}))]
+    (is (= :kernel-memory-fault (:trap data)))
+    (is (= :misaligned-slice-base (:check data)))
+    (is (= 4 (w (:width data)))))
+  ;; u8 has no alignment to prove, so the same base is fine.
+  (is (= 9 (w (run slice-load-u8 [4098 1 0] {:memory (image 4098 [9])})))))
+
+(deftest a-slice-refuses-a-null-base-and-an-absent-image
+  (let [data (trapped #(run slice-load-u8 [0 4 0] {:memory (image 4096 [1 2 3 4])}))]
+    (is (= :null-base (:check data))))
+  (let [data (trapped #(run slice-load-u8 [4096 4 0] {}))]
+    (is (= :kernel-memory-unavailable (:trap data)))
+    (is (= 'slice-load-u8 (:operation data)))))
+
+(deftest a-slice-access-outside-the-supplied-image-is-a-refusal-not-a-verdict
+  ;; The image is smaller than the declared slice. That is neither an
+  ;; admission nor a refusal by the machine: the oracle could not answer.
+  (let [data (trapped #(run slice-load-u8 [4096 100 50] {:memory (image 4096 [1 2 3 4])}))]
+    (is (= :kernel-memory-outside-image (:trap data)))
+    (is (= 'slice-load-u8 (:operation data)))))
