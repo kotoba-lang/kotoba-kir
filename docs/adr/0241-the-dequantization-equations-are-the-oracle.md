@@ -1,4 +1,4 @@
-# ADR 0240: the dequantization equations are the oracle
+# ADR 0241: the dequantization equations are the oracle
 
 Status: accepted. Date: 2026-09-02.
 
