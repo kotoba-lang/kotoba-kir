@@ -1480,8 +1480,55 @@
 ;; return at all. There is no value this interpreter could return for any of
 ;; the four that would be right, and for the last one there is no value.
 (def ^:private kernel-uefi-operations
-  '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to})
+  '#{kernel-system-table kernel-load-ptr kernel-uefi-call2 kernel-jump-to
+     ;; boot-lit: the two wider calls (kotoba-gmir ADR-0011). Six and eight
+     ;; operands, four and six UEFI arguments -- `AllocatePages`,
+     ;; `HandleProtocol`, `GetMemoryMap`, `OpenProtocol`. They refuse here for
+     ;; exactly the reason `kernel-uefi-call2` does; the arity is the only
+     ;; thing that differs, and it is the backend's business.
+     kernel-uefi-call4 kernel-uefi-call6})
 ;; boot: end
+
+;; boot-lit: read-only literals (kotoba-gmir ADR-0011).
+;;
+;; `(ucs2 "AIUEOS")`, `(guid "5B1B31A1-...")` and `(bytes-literal "48656c")`
+;; each answer with the ADDRESS of bytes the backend placed in the image.
+;; There is no address here. This interpreter has no image, no load base and
+;; no pool; any number it returned would be a number, and the caller would
+;; hand it to firmware as a `CHAR16 *`.
+;;
+;; They mark a module kernel-native for the same reason the port operations
+;; do -- without that the constant oracle folds one, this trap fires, and a
+;; program that compiles perfectly well fails to compile.
+(def ^:private rodata-address-operations
+  '#{ucs2 guid bytes-literal})
+
+;; `bytes-literal-length` is deliberately NOT in that set. It is the paired
+;; half of `bytes-literal` -- Kotoba has no multi-value return and no pair on
+;; a firmware target, so the address and the length are two heads over the
+;; same literal text -- and unlike the address, the length HAS an answer here:
+;; it is a property of the text, not of the machine. Refusing something
+;; answerable would make the oracle less useful for no gain, and would make a
+;; module that only asks how long a literal is kernel-native for nothing.
+(def ^:private rodata-length-operations
+  '#{bytes-literal-length})
+
+(defn- hex-pair-count
+  "Bytes an even-length hex string denotes, or nil. Deliberately NOT a hex
+  decoder: the byte VALUES belong to the backend that places them, and a
+  second decoder here would be a second thing that has to agree about what a
+  literal is. What this needs to know is only how many there are, and that
+  the text is hex at all -- an odd count or a non-hex digit is a malformed
+  literal whichever layer notices it."
+  [text]
+  (when (and (string? text) (even? (count text)))
+    (let [hex? (fn [character]
+                 (let [code #?(:clj (int character)
+                               :cljs (.charCodeAt character 0))]
+                   (or (<= 48 code 57) (<= 97 code 102) (<= 65 code 70))))]
+      (when (every? hex? text)
+        (quot (count text) 2)))))
+;; boot-lit: end
 
 ;; simd: the f32 dot product (kotoba-gmir ADR 0010).
 ;;
@@ -3920,6 +3967,27 @@
                   op)
         (trap! :kernel-privileged-unavailable {:operation op})
 
+        ;; boot-lit: a literal's address is not a value this interpreter has.
+        ;; Its own reason keyword rather than the privileged one, because it
+        ;; is a different refusal: the privileged family names instructions
+        ;; this machine is not running, and this one names a place in an image
+        ;; that does not exist.
+        (contains? rodata-address-operations op)
+        (trap! :rodata-address-unavailable {:operation op})
+
+        ;; boot-lit: the length, unlike the address, is a property of the
+        ;; literal text and is answerable here.
+        (contains? rodata-length-operations op)
+        (let [[text] args
+              count (or (hex-pair-count text)
+                        (trap! :rodata-literal-malformed
+                               {:operation op :content text}))]
+          ;; An i64 is a `long` on the JVM and a BigInt on ClojureScript; a
+          ;; plain JS number here reaches the result type check as
+          ;; `:value-type-mismatch`, which is how the two branches were found
+          ;; to disagree (nbb `run-tests.cljs`, 2026-09-02).
+          #?(:clj (long count) :cljs (i64/->bigint count)))
+
         (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
         (let [xs (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           #?(:clj
@@ -4225,10 +4293,17 @@
         ;; simd: and the f32 dot product, which marks a module kernel-native
         ;; for the same reason every other memory operation does -- it reads
         ;; memory the constant oracle has not been given.
+        ;; boot-lit: and the three literal ADDRESS heads, for the same
+        ;; reason -- the oracle has no image to place a literal in, so folding
+        ;; one traps and aborts a compile that should have succeeded.
+        ;; `bytes-literal-length` is absent on purpose: it has an answer here,
+        ;; so folding it is correct and marking a module kernel-native for it
+        ;; would cost a whole constant-folding pass for nothing.
         kernel-operations (into kernel-operations
                                 (concat kernel-atomic-operations
                                         kernel-system-operations
                                         kernel-uefi-operations
+                                        rodata-address-operations
                                         kernel-dot-f32-operations))
         kernel-native? (some #(and (seq? %) (contains? kernel-operations (first %)))
                              (tree-seq coll? seq (:functions hir)))
