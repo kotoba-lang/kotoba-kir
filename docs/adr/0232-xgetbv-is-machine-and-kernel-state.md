@@ -1,4 +1,4 @@
-# ADR 0229: `kernel-xgetbv` is machine AND kernel state, so the oracle refuses it
+# ADR 0232: `kernel-xgetbv` is machine AND kernel state, so the oracle refuses it
 
 ## Status
 
