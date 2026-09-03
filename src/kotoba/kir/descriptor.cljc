@@ -161,14 +161,14 @@
     ;; export signature — mirror the vector-f64 body walk.
     (and (seq? value)
          (contains? '#{vector-new vector-count vector-get vector-at
-                      vector-drop vector-assoc vector-conj}
+                      vector-drop vector-take vector-assoc vector-conj}
                     (first value)))
     (reduce (fn [result item] (walk item result))
             (conj found :vector-i64)
             value)
     (and (seq? value)
          (contains? '#{vector-f64-new vector-f64-count vector-f64-get vector-f64-at
-                      vector-f64-drop vector-f64-assoc vector-f64-conj}
+                      vector-f64-drop vector-f64-take vector-f64-assoc vector-f64-conj}
                     (first value)))
     (reduce (fn [result item] (walk item result))
             (conj found :vector-f64)

@@ -121,17 +121,18 @@
      result-ok-of result-err-of result-ok?-of result-value-of result-error-of result-match-of
      variant-new variant-match
      option-some-of option-none-of option-some?-of option-value-of option-match
-     typed-list-new bytes-empty
+     typed-list-new typed-list-nth bytes-empty
      hetero-vector-new hetero-vector-count hetero-vector-at hetero-vector-assoc hetero-vector-equal
      typed-set-new typed-set-count typed-set-contains typed-set-conj typed-set-disj typed-set-equal typed-set-nth
      typed-map-new typed-map-count typed-map-contains typed-map-get
      typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal
+     typed-map-keys typed-map-vals
      xml-path-count xml-name-count xml-name-text xml-path-text xml-path-attr
      decimal-f64-parse decimal-f64x3-parse
      record-new record-get record-assoc record-equal
-     vector-count vector-get vector-at vector-drop vector-assoc vector-assoc! vector-conj vector-alloc
+     vector-count vector-get vector-at vector-drop vector-take vector-assoc vector-assoc! vector-conj vector-alloc
      vector-f64-new vector-f64-count vector-f64-get vector-f64-at
-     vector-f64-drop vector-f64-assoc vector-f64-conj
+     vector-f64-drop vector-f64-take vector-f64-assoc vector-f64-conj
      string-index-new string-index-count string-index-contains string-index-get string-index-assoc
      disjoint-set-i64-new disjoint-set-i64-count disjoint-set-i64-union
      document-null document-bool document-i64 document-f64 document-string document-keyword document-symbol
@@ -863,10 +864,10 @@
                   ;; makes that expansion finite is `vector-item-limit`, and it
                   ;; is enforced where the value is built, not here.
                   (contains? '#{vector-new vector-alloc vector-count vector-get vector-at
-                                vector-drop vector-assoc vector-assoc! vector-conj
+                                vector-drop vector-take vector-assoc vector-assoc! vector-conj
                                 vector-f64-new vector-f64-count vector-f64-get
-                                vector-f64-at vector-f64-drop vector-f64-assoc
-                                vector-f64-conj}
+                                vector-f64-at vector-f64-drop vector-f64-take
+                                vector-f64-assoc vector-f64-conj}
                              op)
                   (every? walk args)
                   ;; typed-set is a host-table handle, the same width as
@@ -3891,6 +3892,35 @@
                           item-forms)]
           (value/bounded-typed-value! type [type items]))
 
+        ;; `[:list T]` had a constructor and one reader, and only one.
+        ;;
+        ;; Measured 2026-09-03: `(vector-count (typed-list-new [:list :i64]
+        ;; 7 8 9))` is 3, and `(vector-count (typed-list-new [:list :string]
+        ;; "a" "b"))` is 2 -- `vector-count` above walks a `[:list T]` carrier
+        ;; deliberately, for any item type. So NO `typed-list-count` is added
+        ;; here: a primitive whose work an existing one already does is a
+        ;; second spelling, not a capability, and two counts over one carrier
+        ;; is exactly the shape that lets the two disagree later.
+        ;;
+        ;; Indexing had nothing: `vector-at`, `vector-get` and `vector-drop`
+        ;; all require `:vector-i64` and refuse a list by type. This is that
+        ;; missing accessor, shaped on `typed-set-nth`, which is the same
+        ;; operation over the same `[type items]` carrier.
+        ;;
+        ;; It is in this change because `typed-map-keys` and `typed-map-vals`
+        ;; below produce a `[:list T]`: a projection that can only be counted
+        ;; is a value no program can read an element out of.
+        (= op 'typed-list-nth)
+        (let [[type value-form index-form] args
+              list-value (value/bounded-typed-value!
+                          type (eval-expr value-form env functions fuel heap call-stack cap-call))
+              raw-index (eval-expr index-form env functions fuel heap call-stack cap-call)
+              index #?(:clj (long raw-index) :cljs (js/Number raw-index))
+              items (second list-value)]
+          (when (or (neg? index) (>= index (count items)))
+            (trap! :list-index-out-of-bounds {:index index :count (count items)}))
+          (value/bounded-typed-value! (second type) (nth items index)))
+
         (= op 'hetero-vector-count)
         (let [[type value-form] args
               items (value/bounded-typed-value!
@@ -4043,6 +4073,30 @@
             (let [[key item] (nth (second map-value) index)]
               [option-type true [entry-type key item]])))
 
+        ;; `keys` and `vals`, in entry order.
+        ;;
+        ;; The result type is `[:list K]` / `[:list V]` and not a set: a map's
+        ;; KEYS are distinct, so a set would be a faithful carrier for one of
+        ;; the two -- and its VALUES are not, so the same choice for `vals`
+        ;; would silently drop every repeated value and answer a shorter
+        ;; collection than the map has entries. One carrier for both, and the
+        ;; only one this profile has that is homogeneous, ordered and
+        ;; dynamically sized, is `[:list T]`.
+        ;;
+        ;; Order is the map's own entry order -- the order `typed-map-entry-at`
+        ;; walks -- so `(nth (keys m) i)` and `(nth (vals m) i)` name the two
+        ;; halves of the SAME entry. Nothing else would let a program pair
+        ;; them back up.
+        (contains? '#{typed-map-keys typed-map-vals} op)
+        (let [[type value-form] args
+              map-value (value/bounded-typed-value!
+                         type (eval-expr value-form env functions fuel heap call-stack cap-call))
+              item-type (if (= op 'typed-map-keys) (second type) (nth type 2))
+              projection [:list item-type]
+              items (mapv (if (= op 'typed-map-keys) first second)
+                          (second map-value))]
+          (value/bounded-typed-value! projection [projection items]))
+
         (= op 'typed-map-assoc)
         (let [[type value-form key-form item-form] args
               map-value (value/bounded-typed-value!
@@ -4147,6 +4201,31 @@
           (value/bounded-vector-i64!
            (subvec items #?(:clj drop-count :cljs (js/Number drop-count)))))
 
+        ;; `vector-take` is `vector-drop`'s mirror: drop keeps the TAIL after
+        ;; the first n, take keeps the HEAD, the first n. It exists because
+        ;; there was no rear-truncating vector operation at all, and Clojure's
+        ;; `pop` on a vector is every item but the LAST -- a front drop cannot
+        ;; express it. `(vector-take v (- (vector-count v) 1))` is that `pop`,
+        ;; which is why no separate `vector-pop` is added: a primitive whose
+        ;; work an existing one already does is a second spelling, not a
+        ;; capability.
+        ;;
+        ;; The bounds are `vector-drop`'s bounds with the same reading: `n`
+        ;; must be in `[0, count]`. That is what makes `pop` on an EMPTY
+        ;; vector trap rather than answer something -- `count` is 0, `n` is
+        ;; -1, and -1 is out of range, so the emptiness case falls out of the
+        ;; neighbour's own check instead of needing one of its own. Clojure's
+        ;; `pop` on an empty vector throws; this traps. Neither answers.
+        (= op 'vector-take)
+        (let [[items-form count-form] args
+              items (value/bounded-vector-i64!
+                     (eval-expr items-form env functions fuel heap call-stack cap-call))
+              take-count (eval-expr count-form env functions fuel heap call-stack cap-call)]
+          (when-not (and (not (neg? take-count)) (<= take-count (count items)))
+            (trap! :vector-take-out-of-range {:count take-count}))
+          (value/bounded-vector-i64!
+           (subvec items 0 #?(:clj take-count :cljs (js/Number take-count)))))
+
         ;; A vector of `n` zeros.
         ;;
         ;; `vector-new` is variadic, so building a million-slot struct of
@@ -4237,6 +4316,22 @@
             (trap! :vector-f64-drop-out-of-range {:count drop-count}))
           (value/bounded-vector-f64!
            (subvec items #?(:clj drop-count :cljs (js/Number drop-count)))))
+
+        ;; The f64 half of `vector-take`, for the reason `vector-f64-drop`
+        ;; exists next to `vector-drop`: the friendly heads that reach a
+        ;; bounded vector reach BOTH widths, so a rear truncation admitted for
+        ;; one width and not the other would make `pop` answer on `[1 2 3]`
+        ;; and refuse on the f64 vector beside it.
+        (= op 'vector-f64-take)
+        (let [[items-form count-form] args
+              items (value/bounded-vector-f64!
+                     (eval-expr items-form env functions fuel heap call-stack cap-call))
+              take-count (eval-expr count-form env functions fuel heap call-stack cap-call)]
+          (when-not (and #?(:clj (integer? take-count) :cljs (i64/bigint-value? take-count))
+                         (not (neg? take-count)) (<= take-count (count items)))
+            (trap! :vector-f64-take-out-of-range {:count take-count}))
+          (value/bounded-vector-f64!
+           (subvec items 0 #?(:clj take-count :cljs (js/Number take-count)))))
 
         (= op 'vector-f64-assoc)
         (let [[items-form index-form item-form] args

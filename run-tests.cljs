@@ -12,6 +12,10 @@
 (ns run-tests
   (:require [cljs.test :as t]
             [kotoba.kir-cljs-i64-ashr-test]
+            ;; the six collection primitives the friendly heads had nothing to
+            ;; lower to: vector-take (and its f64 half), the [:list T]
+            ;; accessors, and the map key/value projections
+            [kotoba.kir-collection-primitive-test]
             ;; a core let takes one body form; a core if takes three parts
             [kotoba.kir-core-form-shape-test]
             ;; dequant-iq: the four codebook formats, element by element
@@ -44,6 +48,7 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.kir-cljs-i64-ashr-test
+             'kotoba.kir-collection-primitive-test
              'kotoba.kir-core-form-shape-test
              'kotoba.kir-dequant-iq-test
              'kotoba.kir-document-container-index-test
