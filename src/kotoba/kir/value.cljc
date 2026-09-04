@@ -857,6 +857,23 @@
   #?(:clj (.toLowerCase ^String value java.util.Locale/ROOT)
      :cljs (.toLowerCase value)))
 
+;; The mirror of `fold-case!`. The same locale determinism rules apply: the
+;; JVM `clojure.string/upper-case` (and bare `.toUpperCase()`) folds through
+;; the platform DEFAULT locale -- Turkish (`tr`/`tr-TR`) maps lowercase `i` to
+;; dotted capital `İ`, not `I` -- so this always pins `Locale/ROOT` on the
+;; JVM. cljs's `.toUpperCase()` (no-arg) is already locale-independent
+;; Unicode simple case mapping. The two are verified to agree on the ASCII and
+;; common accented-Latin ranges this primitive's conformance vectors cover;
+;; the full Unicode SpecialCasing table (Turkish `İ`/`ı`, German `ß`, Greek
+;; final-sigma context, Lithuanian dot-retention) is explicitly out of scope,
+;; exactly as for `fold-case!`.
+(defn upper-case!
+  [value]
+  (when-not (string? value)
+    (throw (ex-info "value is not a string" {:phase :value :value value})))
+  #?(:clj (.toUpperCase ^String value java.util.Locale/ROOT)
+     :cljs (.toUpperCase value)))
+
 (defn bounded-map!
   "Validate the first bounded map profile: canonical keyword keys and i64
   values only. The representation is immutable host data, never a pointer or

@@ -105,6 +105,7 @@
 ;; features are actually used, not just the HIR format tag.
 (def non-string-typed-ops
   '#{string-replace-all string-contains? string-split-count string-fold-case
+     string-upper
      f32-to-bits f32-from-bits f64-to-f32-rounded f32-to-f64-exact
      f32-add f32-sub f32-mul f32-div f32-min f32-max f32-neg f32-abs f32-sqrt
      f32-eq f32-lt f32-le f32-gt f32-ge f32-unordered
@@ -3525,6 +3526,11 @@
         (= op 'string-fold-case)
         (value/bounded-string!
          (value/fold-case! (eval-expr (first args) env functions fuel heap call-stack cap-call))
+         value/string-value-byte-limit)
+
+        (= op 'string-upper)
+        (value/bounded-string!
+         (value/upper-case! (eval-expr (first args) env functions fuel heap call-stack cap-call))
          value/string-value-byte-limit)
 
         (= op 'keyword-from-string)
