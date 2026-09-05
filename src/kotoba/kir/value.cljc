@@ -779,6 +779,33 @@
           (recur (+ index units) (+ byte-index bytes)
                  (assoc boundaries (+ byte-index bytes) (+ index units))))))))
 
+(defn utf8-index-of!
+  "First UTF-8 BYTE offset of NEEDLE in VALUE, -1 when absent. The empty
+  needle is refused by the caller (KIR traps on it), mirroring
+  :empty-string-search-needle. Strings are CLJC strings here; the byte
+  offset is derived by walking code-point boundaries exactly as
+  utf8-substring! does, so astral and multi-byte prefixes compose."
+  [value needle]
+  (let [_check (utf8-byte-count! value)
+        _check-needle (utf8-byte-count! needle)]
+    (if-let [host-idx #?(:clj (.indexOf ^String value ^String needle)
+                         :cljs (.indexOf value needle))]
+      (if (neg? host-idx)
+        -1
+        ;; host index is a UTF-16 unit index; convert to UTF-8 byte offset.
+        (loop [i 0 byte-index 0]
+          (if (>= i host-idx)
+            byte-index
+            (let [unit #?(:clj (int (.charAt ^String value i))
+                          :cljs (.charCodeAt value i))
+                  bytes (cond
+                          (<= unit 0x7f) 1
+                          (<= unit 0x7ff) 2
+                          (<= 0xd800 unit 0xdbff) 4
+                          :else 3)]
+              (recur (+ i 1) (+ byte-index bytes))))))
+      -1)))
+
 (defn utf8-code-point-at!
   "Return the Unicode code point of the UTF-8 sequence that STARTS at BYTE-OFFSET
   (a UTF-8 byte offset into VALUE, same coordinate space as utf8-substring!'s
