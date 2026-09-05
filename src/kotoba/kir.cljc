@@ -3507,6 +3507,15 @@
           (when (empty? needle) (trap! :empty-string-search-needle {}))
           (str/includes? haystack needle))
 
+        ;; String search surface (kbb scripts-port wave 2): first UTF-8 byte
+        ;; offset of needle, -1 when absent. Same empty-needle trap as
+        ;; string-contains?/string-split-count.
+        (= op 'string-index-of)
+        (let [[haystack needle]
+              (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
+          (when (empty? needle) (trap! :empty-string-search-needle {}))
+          (value/utf8-index-of! haystack needle))
+
         ;; T4.2: number of segments when splitting haystack by non-empty sep
         ;; (non-overlapping). Empty separator traps. Matches JS split length
         ;; for non-regex separators (e.g. "" / "," → 1, "a,b" / "," → 2).
