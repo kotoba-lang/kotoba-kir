@@ -30,7 +30,7 @@
 (deftest typed-component-target-is-a-non-ambient-component
   (is (= {:execution :component
           :abi :component-canonical-abi-v2
-          :runtime :kotoba-component-runtime-v2
+          :runtime :kototama-component-runtime-v2
           :wasi-version "0.3.0"
           :ambient-wasi false}
          (select-keys (target/profile :wasm-component-kotoba-v2)
@@ -40,7 +40,7 @@
   (is (= {:execution :evm
           :isa :evm256
           :abi :ethereum-contract-abi-v1
-          :runtime :kotoba-evm-host-v1
+          :runtime :kototama-evm-host-v1
           :evm-revision :shanghai
           :ambient-precompiles false}
          (select-keys (target/profile :evm256-kotoba-v1)
