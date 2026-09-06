@@ -12,6 +12,6 @@
                ;; 追従していなかった。fleet の root-repository-roles gate が
                ;; missing-from-rule で赤にしていた（amu も同じ形で、そちらは
                ;; c2ff8799 で解消済み）。
-               "kotoba-lang/dag-cbor"
+               "kotoba-lang/org-ietf-cbor"
                "kotoba-lang/io-multiformats"
                "kotoba-lang/kotoba-hir"]}}
