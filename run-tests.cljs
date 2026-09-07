@@ -39,6 +39,9 @@
             [kotoba.kir-rodata-literal-test]
             ;; slice-value: the ADR 0285 carrier's semantics and its named refusal
             [kotoba.kir-slice-carrier-test]
+            ;; string-index-of: UTF-8 byte offset through the constant oracle,
+            ;; and a BigInt answer on this host
+            [kotoba.kir-string-index-of-test]
             [kotoba.kir-uleb-i64-test]
             ;; string-upper: the mirror of string-fold-case at the KIR eval
             [kotoba.kir-string-upper-test]))
@@ -65,5 +68,6 @@
              'kotoba.kir-loop-helper-tail-position-test
              'kotoba.kir-rodata-literal-test
              'kotoba.kir-slice-carrier-test
+             'kotoba.kir-string-index-of-test
              'kotoba.kir-uleb-i64-test
              'kotoba.kir-string-upper-test)
