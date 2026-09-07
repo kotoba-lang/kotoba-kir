@@ -3510,11 +3510,25 @@
         ;; String search surface (kbb scripts-port wave 2): first UTF-8 byte
         ;; offset of needle, -1 when absent. Same empty-needle trap as
         ;; string-contains?/string-split-count.
+        ;;
+        ;; The answer is an i64 and must be represented as one on BOTH hosts:
+        ;; `utf8-index-of!` returns the host's plain number, which is what
+        ;; every i64 is on the JVM but not on ClojureScript, where an i64 is a
+        ;; BigInt (`i64/->bigint`, exactly as `string-byte-length`,
+        ;; `string-code-point-at` and `string-split-count` below hand theirs
+        ;; back). Measured 2026-09-07 under nbb before this wrap: `execute`
+        ;; refused the pure entry `(string-index-of "abcdef" "de")` with
+        ;; `:value-type-mismatch :expected :i64`, and inside a module
+        ;; `(if (= (string-index-of "héllo wörld" "wö") 7) 1 0)` folded to 0 --
+        ;; a wrong answer with no trap, because `=` saw a number next to a
+        ;; BigInt. Pinned by `kir_string_index_of_test.cljc`, which is listed
+        ;; in `run-tests.cljs` so this branch is actually executed.
         (= op 'string-index-of)
         (let [[haystack needle]
               (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           (when (empty? needle) (trap! :empty-string-search-needle {}))
-          (value/utf8-index-of! haystack needle))
+          (let [idx (value/utf8-index-of! haystack needle)]
+            #?(:clj (long idx) :cljs (i64/->bigint idx))))
 
         ;; T4.2: number of segments when splitting haystack by non-empty sep
         ;; (non-overlapping). Empty separator traps. Matches JS split length
