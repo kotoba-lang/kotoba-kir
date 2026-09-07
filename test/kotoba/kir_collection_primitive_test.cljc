@@ -207,3 +207,25 @@
   (is (= 7 (i64 '(max 3 7))))
   (is (= 7 (i64 '(max 7 3))))
   (is (= 3 (i64 '(max -5 3)))))
+
+;; --- document-vector-sort: deterministic order for cohort ranking ---------
+(deftest document-vector-sort-orders-by-the-document-comparator
+  ;; sorted [10 20 30]; assoc a marker onto index 0 via document-vector-at comparison
+  (is (= 3 (i64 (list 'document-count
+                      (list 'document-vector-sort
+                            (list 'document-vector
+                                  (list 'document-i64 30) (list 'document-i64 10)
+                                  (list 'document-i64 20)))))))
+  ;; first element after sort is 10 (document comparator orders ascending)
+  (is (= 10 (i64 (list 'option-value-of [:option :i64]
+                       (list 'document-i64-value
+                             (list 'option-value-of [:option :document]
+                                   (list 'document-vector-at
+                                         (list 'document-vector-sort
+                                               (list 'document-vector
+                                                     (list 'document-i64 30)
+                                                     (list 'document-i64 10)
+                                                     (list 'document-i64 20)))
+                                         0)
+                                   (list 'document-null)))
+                       -1)))))
