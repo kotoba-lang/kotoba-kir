@@ -139,7 +139,7 @@
      document-null document-bool document-i64 document-f64 document-string document-keyword document-symbol
      document-vector document-list document-set document-map document-count document-kind document-equal? document-set-contains? document-contains document-get
      document-vector-at document-list-at document-map-entry-at document-vector-assoc document-vector-conj document-vector-drop
-     document-vector-remove
+     document-vector-remove document-vector-sort
      document-assoc document-dissoc document-merge document-string-value document-keyword-value document-symbol-value
      document-bool-value document-i64-value document-f64-value document-sha256 document-print document-read
      document-edn-print document-edn-read
@@ -4578,6 +4578,15 @@
                 (value/bounded-document!
                  ["vector" (vec (concat (subvec items 0 at)
                                         (subvec items (inc at))))])))))
+
+        (= op 'document-vector-sort)
+        (let [[tag items]
+              (value/bounded-document!
+               (eval-expr (first args) env functions fuel heap call-stack cap-call))]
+          (when-not (= tag "vector")
+            (trap! :document-vector-required {:tag tag}))
+          ;; deterministic total order via the existing doc comparator
+          (value/bounded-document! ["vector" (vec (sort value/document-compare items))]))
 
         (= op 'document-map-entry-at)
         (let [[tag entries]
