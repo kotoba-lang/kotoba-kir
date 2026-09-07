@@ -22,7 +22,31 @@
         {:git/url "https://github.com/kotoba-lang/org-ietf-cbor.git"
          :git/sha "58144e81ccdf7a82367085c66ea21ca84a1a7ddb"}}
  :aliases {:test {:extra-paths ["test"]
-                  :extra-deps {io.github.cognitect-labs/test-runner
+                  ;; TEST ONLY, deliberately. Root ADR
+                  ;; adr-2609076000-kir-is-an-ipld-codec-schema-and-adl decided
+                  ;; the canonical bytes should come from io-ipld; this pin is
+                  ;; here to MEASURE the gap to kotoba.value.v1, not to have
+                  ;; crossed it. Promoting it to :deps is the payload v3
+                  ;; decision, because every frozen vector disagrees today --
+                  ;; see kotoba.kir-value-codec-differential-test. Acyclic:
+                  ;; io-ipld depends only on dev-protobuf, io-multiformats and
+                  ;; org-ietf-cbor, the last two of which are already above.
+                  ;; io-ipld needs `multiformats.base32`, which this
+                  ;; repository's top-level io-multiformats pin predates (it is
+                  ;; 37 commits behind that repository's main as of 2026-09-07).
+                  ;; A top-level dep wins over a transitive one in tools.deps,
+                  ;; so the older pin would be chosen and `ipld.link` would not
+                  ;; load. Overridden HERE rather than at the top level: moving
+                  ;; the runtime pin is a separate change with its own risk, and
+                  ;; the frozen-CID assertions in the differential test double
+                  ;; as evidence that these 37 commits do not move CID assembly.
+                  :override-deps {io.github.kotoba-lang/io-multiformats
+                                  {:git/url "https://github.com/kotoba-lang/io-multiformats.git"
+                                   :git/sha "561fe7dfada3db852b127f06d41750dabd3cead9"}}
+                  :extra-deps {io.github.kotoba-lang/io-ipld
+                               {:git/url "https://github.com/kotoba-lang/io-ipld.git"
+                                :git/sha "973e26a521465d0fdec89cf28fd9a6224830ce36"}
+                               io.github.cognitect-labs/test-runner
                                {:git/url "https://github.com/cognitect-labs/test-runner.git"
                                 :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}}
                   :main-opts ["-m" "cognitect.test-runner"]}}}
