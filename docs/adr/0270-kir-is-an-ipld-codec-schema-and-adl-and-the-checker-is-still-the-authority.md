@@ -67,10 +67,18 @@ finding one layer down.
 
 ## Decision
 
-**1. The canonical bytes come from `io-ipld`, not from a second normalization
+**1. The canonical bytes come from `io-ipld`, not from a second value model
 in this repository.** `kotoba-kir` takes a dependency on `io-ipld`. This is
 acyclic: `io-ipld` depends only on `dev-protobuf`, `io-multiformats` and
 `org-ietf-cbor`, and this repository already carries the latter two.
+
+> **Refined 2026-09-07 by the measurement below.** This read *a second
+> normalization* and conflated two layers. **The codec is already shared** --
+> both encoders are `(cbor/encode <tagged form>)` over the same `cbor.core`
+> from `org-ietf-cbor`, and there is no second DAG-CBOR encoder here to unify.
+> What differs is the VALUE MODEL above it, and moving it is payload v3, not a
+> refactor. The dependency is landed **test-only** for now, which is what
+> measuring the gap costs; promoting it to `:deps` is the v3 decision.
 
 **2. The KIR block shape is an explicit IPLD Schema**, written in
 `ipld.schema-dsl` and validated as Schema DMT by `ipld.schema/compile-schema`.
@@ -129,15 +137,48 @@ and they stay two; unifying them is a separate decision with its own evidence.
 - There is no gate for encoder agreement yet, and this ADR does not invent
   one. See below.
 
-## Next measurable step
+## Measured 2026-09-07 -- the next step, executed
 
-One differential test in this repository, over the frozen vectors of
-kotoba-lang `lang/code-identity-vectors.edn`: for each vector, the bytes
-`canonical-bytes` produces today against the bytes the same logical value
-produces through `kotoba.value.codec`. It answers the only question that
-decides the migration's cost -- whether payload v3 is needed at all -- and it
-fails for the right reason if either encoder moves later.
+`kotoba.kir-value-codec-differential-test`, over this repository's own copy of
+the frozen vectors (verified byte-identical to the kotoba-lang authority), with
+`io-ipld` pinned in the `:test` alias only.
 
-Both directions must be shown: a vector that agrees and a vector that does
-not. A test that only ever reports agreement cannot be told from a test that
-never ran.
+**All ten vectors reproduce byte-for-byte through `canonical-bytes`, and all
+ten disagree with `kotoba.value.v1`.** Payload v3 IS needed. The value codec
+does not *refuse* the payload -- it accepts all ten and returns different bytes
+-- which is asserted separately, so a refusal can never be miscounted as a
+disagreement.
+
+Three independent dimensions, not a tag rename:
+
+| | `normalize` (here) | `value->form` |
+|---|---|---|
+| tag alphabet | strings `map` `kw` `set` `int` `str` | integers `19` `5` `18` `2` `4` |
+| scalar payload | integers as exact decimal **text** | native integers, scalar code 9 for exact i64 |
+| map key order | its own `rank`/`cmp` | DAG-CBOR canonical **length-first** |
+
+Neither key order is wrong: `normalize` never emits a CBOR map, it emits
+`["map" [pairs]]`, so the codec's ordering rule does not bind it. A migration
+that changed only the tag alphabet would still move every CID through the
+other two.
+
+Both directions were shown before calling it landed. Perturbing one frozen hex
+fails the golden half naming that vector; simulating a closed gap fails the
+debt marker with the payload-v3 message and the list of newly-agreeing
+vectors. Restored, it is green again, and the full suite passes with the new
+test dependency.
+
+**Incidental finding.** This repository's top-level `io-multiformats` pin is 37
+commits behind that repository's main and predates `multiformats.base32`, which
+`ipld.link` needs. The test alias overrides it rather than moving the runtime
+pin, because moving a runtime pin is a separate change with its own risk -- and
+the frozen-CID assertions passing under the override are evidence those 37
+commits do not move CID assembly.
+
+## Still to decide
+
+Whether to pay payload v3. The cost is measured; the benefit -- one value model
+instead of two -- is unchanged. **This ADR does not decide it.** Decision 1
+says where the bytes should come from; the price turned out to be a version
+bump touching every locked identity in the workspace. That is an owner
+decision, and the differential test is what stops it happening by accident.
