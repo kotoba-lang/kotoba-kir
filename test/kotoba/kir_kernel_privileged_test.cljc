@@ -70,7 +70,11 @@
    '(kernel-cpuid-ecx 1 0)
    '(kernel-cpuid-edx 2147483649 0)
    '(kernel-read-msr 192)
-   '(kernel-in-u8 1016)])
+   '(kernel-in-u8 1016)
+   ;; amu-h7: the canned #UD handler's address, beside
+   ;; `kernel-double-fault-handler-address`. An ADDRESS in the image's text,
+   ;; which only the backend that lays the text can answer.
+   '(kernel-undefined-opcode-handler-address)])
 
 (deftest machine-state-is-not-invented
   (doseq [body refusals]
@@ -81,7 +85,7 @@
       (is (= (first body) (:operation data))
           (str body " must name itself in the trap"))))
   ;; An empty table is not a green suite.
-  (is (= 10 (count refusals)) "SCANNED refusals"))
+  (is (= 11 (count refusals)) "SCANNED refusals"))
 
 ;; ---------------------------------------------------------------------------
 ;; `lower` does not start an oracle it cannot finish
@@ -135,3 +139,22 @@
   ;; that had stopped folding EVERYTHING would pass the four rows above.
   (is (= 262150 (w (:oracle-value (kir/lower (module '(bit-or 262144 6))))))
       "a pure expression over the same literals still folds"))
+
+;; ---------------------------------------------------------------------------
+;; amu-h7: the #UD handler address marks a module kernel-native too
+;; ---------------------------------------------------------------------------
+
+;; Mirrors `kernel-double-fault-handler-address`. ZERO-arity and an address --
+;; nothing in the shape suggests an effect, so a constant folder has every
+;; structural reason to evaluate it, and the answer is a text address only the
+;; backend that lays the text can give. Without the membership `lower` itself
+;; throws on a kernel that merely asks where its vector 6 gate should point.
+(deftest the-undefined-opcode-handler-address-marks-a-module-kernel-native
+  (let [lowered (kir/lower (module '(kernel-undefined-opcode-handler-address)))]
+    (is (nil? (:oracle-value lowered))
+        "a handler address has no compile-time value")
+    (is (= [] (:blocks lowered))
+        "and therefore no folded constant block"))
+  ;; The control, repeated here rather than borrowed.
+  (is (= 6 (w (:oracle-value (kir/lower (module '(bit-or 4 2))))))
+      "a pure expression over literals still folds"))
