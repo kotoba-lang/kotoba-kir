@@ -196,3 +196,14 @@
     (is (= :list-index-out-of-bounds
            (trap-of :i64 (list 'typed-list-nth [:list :i64]
                                (list 'typed-map-keys [:map :i64 :i64] em) 0))))))
+
+;; --- i64 min/max: the comparator heads spotwork needs (overlap/rank) ------
+(deftest i64-min-selects-the-smaller-operand
+  (is (= 3 (i64 '(min 3 7))))
+  (is (= 3 (i64 '(min 7 3))))
+  (is (= -5 (i64 '(min -5 3)))))
+
+(deftest i64-max-selects-the-larger-operand
+  (is (= 7 (i64 '(max 3 7))))
+  (is (= 7 (i64 '(max 7 3))))
+  (is (= 3 (i64 '(max -5 3)))))

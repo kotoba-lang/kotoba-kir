@@ -145,7 +145,7 @@
      document-edn-print document-edn-read
      i32-wrap u32-wrap i32-wrapping-add i32-wrapping-mul i32-xor
      i32-shift-left i32-shift-right u32-shift-right xorshift32
-     bit-or bit-not i64-shift-left i64-shift-right u64-shift-right
+     bit-or bit-not i64-shift-left i64-shift-right u64-shift-right min max
      keyword-from-string keyword-name symbol})
 
 ;; The two field kinds this backend's own runtime value representation is
@@ -4860,7 +4860,7 @@
           ;; to disagree (nbb `run-tests.cljs`, 2026-09-02).
           #?(:clj (long count) :cljs (i64/->bigint count)))
 
-        (contains? '#{+ - * quot bit-xor bit-and bit-or = < > <= >=} op)
+        (contains? '#{+ - * quot bit-xor bit-and bit-or min max = < > <= >=} op)
         (let [xs (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
           #?(:clj
              (case op
@@ -4875,6 +4875,8 @@
                bit-xor (apply bit-xor xs)
                bit-and (apply bit-and xs)
                bit-or (apply bit-or xs)
+               min (reduce min xs)
+               max (reduce max xs)
                = (if (apply = xs) 1 0)
                < (if (apply < xs) 1 0)
                > (if (apply > xs) 1 0)
@@ -4903,6 +4905,8 @@
                bit-xor (i64/->bigint (apply bit-xor xs))
                bit-and (i64/->bigint (apply bit-and xs))
                bit-or (i64/->bigint (apply bit-or xs))
+               min (i64/->bigint (reduce js/Math.min (map js/Number xs)))
+               max (i64/->bigint (reduce js/Math.max (map js/Number xs)))
                = (if (apply = xs) i64/one i64/zero)
                < (if (apply < xs) i64/one i64/zero)
                > (if (apply > xs) i64/one i64/zero)
