@@ -20,7 +20,7 @@
   read-only pool, say -- can be compared with this one by a test rather than
   only by an execution: two independently typed copies of 8192 bytes that
   agree on a positional digest agree."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn hex->bytes
   "A hex image as a vector of unsigned bytes. Refuses an odd length and any
@@ -30,7 +30,7 @@
   (when-not (even? (count hex))
     (throw (ex-info "codebook hex image has an odd length" {:length (count hex)})))
   (let [digits "0123456789abcdef"
-        value (fn [c] (let [i (str/index-of digits (str/lower-case (str c)))]
+        value (fn [c] (let [i (str/index-of digits (str/lower (str c)))]
                         (or i (throw (ex-info "codebook hex image is not hex"
                                               {:character (str c)})))))]
     (mapv (fn [i] (+ (* 16 (value (nth hex (* 2 i)))) (value (nth hex (inc (* 2 i))))))

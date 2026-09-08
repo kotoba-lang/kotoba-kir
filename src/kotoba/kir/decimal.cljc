@@ -1,5 +1,5 @@
 (ns kotoba.kir.decimal
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.kir.value :as value]))
 
 (def max-f64-bytes 64)

@@ -1,5 +1,5 @@
 (ns kotoba.kir.xml
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.kir.value :as value]
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
 

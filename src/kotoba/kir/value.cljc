@@ -1,5 +1,5 @@
 (ns kotoba.kir.value
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             #?@(:cljs [[sha2.core :as sha2]
                        [kotoba.kir.cljs-i64 :as i64]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
@@ -865,7 +865,7 @@
                       {:phase :value :bytes bytes :limit limit})))
     value))
 
-;; JVM `clojure.string/lower-case` (and bare `.toLowerCase()`) fold through
+;; JVM `str/lower` (and bare `.toLowerCase()`) fold through
 ;; the platform DEFAULT locale, which is not deterministic across hosts --
 ;; the classic case is Turkish (`tr`/`tr-TR`), where uppercase `I` folds to
 ;; dotless `ı`, not `i`. A safe deterministic application language cannot
@@ -885,7 +885,7 @@
      :cljs (.toLowerCase value)))
 
 ;; The mirror of `fold-case!`. The same locale determinism rules apply: the
-;; JVM `clojure.string/upper-case` (and bare `.toUpperCase()`) folds through
+;; JVM `str/upper` (and bare `.toUpperCase()`) folds through
 ;; the platform DEFAULT locale -- Turkish (`tr`/`tr-TR`) maps lowercase `i` to
 ;; dotted capital `İ`, not `I` -- so this always pins `Locale/ROOT` on the
 ;; JVM. cljs's `.toUpperCase()` (no-arg) is already locale-independent
