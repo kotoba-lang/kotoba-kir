@@ -11,6 +11,7 @@
 ;; the superproject measures this file against the directory.
 (ns run-tests
   (:require [cljs.test :as t]
+            [kotoba.kir-alpha-normalization-test]
             [kotoba.kir-cljs-i64-ashr-test]
             ;; the six collection primitives the friendly heads had nothing to
             ;; lower to: vector-take (and its f64 half), the [:list T]
@@ -36,6 +37,8 @@
             [kotoba.kir-i64-order-test]
             ;; boot-scratch: the two heads that name a place in the image
             [kotoba.kir-image-address-test]
+            [kotoba.kir-kernel-dequant-dot-test]
+            [kotoba.kir-kernel-dot-f32-test]
             [kotoba.kir-kernel-memory-test]
             [kotoba.kir-kernel-privileged-test]
             [kotoba.kir-loop-helper-tail-position-test]
@@ -47,7 +50,8 @@
             [kotoba.kir-string-index-of-test]
             [kotoba.kir-uleb-i64-test]
             ;; string-upper: the mirror of string-fold-case at the KIR eval
-            [kotoba.kir-string-upper-test]))
+            [kotoba.kir-string-upper-test]
+            [kotoba.kir-uefi-boundary-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -55,7 +59,8 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.kir-cljs-i64-ashr-test
+(t/run-tests 'kotoba.kir-alpha-normalization-test
+             'kotoba.kir-cljs-i64-ashr-test
              'kotoba.kir-collection-primitive-test
              'kotoba.kir-core-form-shape-test
              'kotoba.kir-dequant-iq-test
@@ -67,6 +72,8 @@
              'kotoba.kir-oracle-fuel-budget-test
              'kotoba.kir-i64-order-test
              'kotoba.kir-image-address-test
+             'kotoba.kir-kernel-dequant-dot-test
+             'kotoba.kir-kernel-dot-f32-test
              'kotoba.kir-kernel-memory-test
              'kotoba.kir-kernel-privileged-test
              'kotoba.kir-loop-helper-tail-position-test
@@ -74,4 +81,5 @@
              'kotoba.kir-slice-carrier-test
              'kotoba.kir-string-index-of-test
              'kotoba.kir-uleb-i64-test
-             'kotoba.kir-string-upper-test)
+             'kotoba.kir-string-upper-test
+             'kotoba.kir-uefi-boundary-test)

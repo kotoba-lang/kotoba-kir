@@ -34,7 +34,8 @@
   and no file above 2 GiB exists under $HOME while the whole volume holds
   17 GiB. So every block below is SYNTHESISED, and the cross-check is against
   the port of the C rather than against the model. Measured 2026-09-02."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+            :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]))
 
