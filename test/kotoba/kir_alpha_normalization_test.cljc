@@ -7,7 +7,8 @@
   this walk is what does. Both directions are stated -- a suite that only shows
   the renaming working would pass just as well against a walk that renamed
   nothing, because nothing would then leak either."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+            :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.kir.alpha-normalization :as an]
             [kotoba.kir.definition-identity :as di]))
 

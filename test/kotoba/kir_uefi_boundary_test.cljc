@@ -7,7 +7,8 @@
   transfer that does not return. A refusal is the only honest answer, and this
   file exists so a later change that starts answering one of them is a red
   test rather than an invented boot."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+            :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.kir :as kir]
             [kotoba.kir.target :as target]))
 

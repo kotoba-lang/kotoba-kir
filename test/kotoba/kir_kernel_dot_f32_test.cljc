@@ -26,7 +26,8 @@
   The expected values are computed here by an UNROLLED tree written out
   element by element, not by a loop. A loop in the test would repeat whatever
   off-by-one the loop under test has."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+            :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
             [kotoba.test-hir :as test-hir]))
