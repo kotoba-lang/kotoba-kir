@@ -767,6 +767,32 @@
                   ;; increment measured `bit-or` and `bit-not`, not them.
                   (contains? '#{bit-or bit-not} op)
                   (every? walk args)
+                  ;; The shift family, widened 2026-09-08. The comment above
+                  ;; gave the reason for their absence as "this increment
+                  ;; measured `bit-or` and `bit-not`, not them" -- an
+                  ;; implementation state, not a property, and it was the only
+                  ;; thing between a typed-value module and native.
+                  ;;
+                  ;; It was invisible because a module with NO typed value
+                  ;; never reaches this predicate: `(i64-shift-left x 3)`
+                  ;; compiled to aarch64 on its own, and the same function was
+                  ;; refused the moment a `:vector-i64` appeared beside it.
+                  ;; Measured 2026-09-08 on SHA-512 written in the guest
+                  ;; subset, which is rotations over a vector of words.
+                  ;;
+                  ;; The operand restriction the comment names is enforced
+                  ;; here rather than inherited: the count must be an integer
+                  ;; literal in [0,63], which is what lets a backend lower a
+                  ;; shift onto CL without a mask. The frontend refuses a
+                  ;; non-literal count too, but this predicate is what native
+                  ;; admission trusts, so it does not assume that.
+                  (contains? '#{i64-shift-left i64-shift-right u64-shift-right} op)
+                  (let [[value shift] args]
+                    (and (= 2 (count args))
+                         #?(:clj (integer? shift)
+                            :cljs (or (i64/bigint-value? shift) (integer? shift)))
+                         (<= 0 shift 63)
+                         (walk value)))
                   (= op 'option-some)
                   (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-none)
@@ -4982,6 +5008,14 @@
    ;; counters that ever hold this number are still exact -- see its docstring.
    ;; Refusing here rather than clamping, because a clamped budget is a
    ;; different program's answer wearing this program's receipt.
+   ;; The `integer?` above is deliberate and the CALLER must honour it. It was
+   ;; silently violated: `kotoba.verifier` passed `(get-in kexe [:limits :fuel])`
+   ;; -- a number read back out of an artifact, which is a JavaScript bigint on
+   ;; the cljs host -- as this "interpreter-internal config", so every native
+   ;; artifact was refused here. Fixed at that boundary rather than by widening
+   ;; this gate: a bigint reaching the fuel counter mixes with the plain-number
+   ;; arithmetic downstream and JavaScript throws on the mix, so admitting one
+   ;; here would only move the failure.
    (when-not (and (integer? fuel) (pos? fuel) (<= fuel max-fuel))
      (throw (ex-info "fuel must be a positive integer within the admitted ceiling"
                      {:phase :ir :reason :fuel-outside-admitted-range

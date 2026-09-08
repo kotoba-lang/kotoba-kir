@@ -16,10 +16,10 @@
   string/scalar-record/option-i64/result-i64 features\", a message about typed
   values that names neither operation.
 
-  Both directions are pinned. The shift families sit in the same set with the
-  same absence and are still refused, because they carry an operand restriction
-  the two here do not (the count must be an integer literal in range) and this
-  increment measured `bit-or` and `bit-not` rather than them."
+  Both directions are pinned. The i64 shift family was widened on 2026-09-08
+  with its own evidence, which is what the paragraph below used to ask for --
+  see `the-i64-shift-family-is-admitted-with-its-operand-restriction`.
+  `xorshift32` is still refused and nothing here measured it."
   (:require [clojure.test :refer [deftest is testing]]
             [kotoba.kir :as kir]))
 
@@ -43,16 +43,33 @@
     (is (kir/only-native-word-typed-features? (typed-hir body))
         (pr-str body))))
 
-(deftest the-i64-shift-family-is-still-refused
-  (testing "not widened here. The refused set is exactly the three i64 shifts
-            and xorshift32; their i32 twins ARE admitted, which measures the
-            omission as arbitrary rather than principled -- and is a reason to
-            widen them deliberately with their own evidence, not as a side
-            effect of this one."
+(deftest the-i64-shift-family-is-admitted-with-its-operand-restriction
+  ;; Widened 2026-09-08. The version of this test that refused them asked for
+  ;; exactly this: "a reason to widen them deliberately with their own
+  ;; evidence, not as a side effect of this one." The evidence is SHA-512
+  ;; written in the guest subset -- rotations over a vector of words, so every
+  ;; shift sits beside a `:vector-i64` and the module is v3. It compiled to
+  ;; aarch64 the moment these three were admitted and not before.
+  (testing "admitted when the count is an integer literal in range"
     (doseq [body (quote [(i64-shift-left a 3) (i64-shift-right a 3)
-                         (u64-shift-right a 3) (xorshift32 a)])]
+                         (u64-shift-right a 3)
+                         (i64-shift-left a 0) (u64-shift-right a 63)
+                         ;; the shape SHA-512 is made of: one rotation
+                         (bit-or (u64-shift-right a 28) (i64-shift-left a 36))])]
+      (is (kir/only-native-word-typed-features? (typed-hir body))
+          (pr-str body))))
+  (testing "the operand restriction is enforced HERE, not inherited from the
+            frontend -- this predicate is what native admission trusts. A
+            count that is not an integer literal, or is outside [0,63], is
+            what stops a backend lowering the shift onto CL without a mask."
+    (doseq [body (quote [(i64-shift-left a b)
+                         (i64-shift-left a 64)
+                         (u64-shift-right a -1)
+                         (i64-shift-right a (+ 1 2))])]
       (is (not (kir/only-native-word-typed-features? (typed-hir body)))
           (pr-str body))))
+  (testing "xorshift32 is still refused; nothing here measured it"
+    (is (not (kir/only-native-word-typed-features? (typed-hir '(xorshift32 a))))))
   (testing "the i32 twins, measured 2026-09-02"
     (doseq [body (quote [(i32-shift-left a 3) (i32-shift-right a 3)
                          (u32-shift-right a 3) (i32-wrap a) (i32-xor a b)])]
@@ -65,7 +82,9 @@
   ;; `:kotoba.hir/v3` -- which a module becomes only by using a typed value.
   ;; So `bit-or` compiled on native for as long as nothing beside it was
   ;; typed. The predicate itself refuses the same body under either tag.
-  (let [body (quote (i64-shift-left (bit-or a b) 3))]
+  ;; `xorshift32` rather than a shift: the shifts are admitted since
+  ;; 2026-09-08, so they no longer demonstrate a body this predicate refuses.
+  (let [body (quote (xorshift32 (bit-or a b)))]
     (is (not (kir/only-native-word-typed-features?
               (assoc (typed-hir body) :format :kotoba.hir/v2))))
     (is (not (kir/only-native-word-typed-features? (typed-hir body))))))
