@@ -11,6 +11,11 @@
 ;; the superproject measures this file against the directory.
 (ns run-tests
   (:require [cljs.test :as t]
+            ;; 2026-09-08: `kir_test.clj` was the ONLY test reaching
+            ;; `kir.admission`, `kir.compatibility`, `kir.decimal` and
+            ;; `kir.xml` -- four `.cljc` sources verified on one host,
+            ;; all four closed by porting this single file.
+            [kotoba.kir-test]
             [kotoba.kir-alpha-normalization-test]
             [kotoba.kir-cljs-i64-ashr-test]
             ;; the six collection primitives the friendly heads had nothing to
@@ -59,7 +64,8 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.kir-alpha-normalization-test
+(t/run-tests 'kotoba.kir-test
+             'kotoba.kir-alpha-normalization-test
              'kotoba.kir-cljs-i64-ashr-test
              'kotoba.kir-collection-primitive-test
              'kotoba.kir-core-form-shape-test

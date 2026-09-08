@@ -1,5 +1,6 @@
 (ns kotoba.kir-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require #?(:clj  [clojure.test :refer [deftest is]]
+               :cljs [cljs.test :refer [deftest is] :include-macros true])
             [kotoba.kir]
             [kotoba.kir.value]
             [kotoba.kir.target :as target]
@@ -51,9 +52,9 @@
       "the bounded first slice must not claim whole-language parity"))
 
 (deftest lowering-rejects-malformed-hir-before-consuming-it
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unknown-module-keys"
+  (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo) #"unknown-module-keys"
                         (kotoba.kir/lower (assoc valid-hir :private true))))
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"module-effects-mismatch"
+  (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo) #"module-effects-mismatch"
                         (kotoba.kir/lower
                          (assoc-in valid-hir [:functions 0 :effects]
                                    #{[:cap/call 7]})))))
