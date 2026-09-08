@@ -76,7 +76,25 @@
 ;; Compile-time constant oracle may need more budget than the historical
 ;; runtime default (T7.2 / T7.4 deep loop). Runtime `execute` still defaults
 ;; to `default-fuel` (512) unless the caller passes `:fuel`.
-(def ^:private oracle-fuel 100000)
+(def ^:private default-oracle-fuel
+  "Budget for the compile-time constant oracle when the caller names none.
+
+  The oracle re-executes a pure entry at LOWERING time to seal its value, and
+  this number used to be the only budget it could ever have: `lower` took one
+  argument, so `--fuel` reached the artifact's `:limits` and the verifier's
+  re-execution and never reached here. A program whose evaluation cost more
+  than this was refused as `fuel-exhausted` no matter what budget its author
+  declared -- measured 2026-09-08 on the X25519 Montgomery ladder
+  (kotoba-lang/org-ietf-x25519, kotoba/x25519/core.kotoba), which is about
+  900,000 operations and was refused identically at `--fuel 60000000` and at
+  `--fuel 9007199254740991`, the largest budget this file admits.
+
+  The default is unchanged, so a caller that names nothing sees what it always
+  saw. What is new is that a caller CAN name one, and `kotoba.verifier`
+  re-derives the sealed value under the artifact's declared budget -- so a
+  caller passing that same number makes the two executions agree by
+  construction rather than by both happening to fit in this constant."
+  100000)
 (def ^:private default-pair-capacity 4096)
 (def ^:private default-kgraph-capacity 4096)
 (def ^:dynamic *runtime-schemas* nil)
@@ -5141,7 +5159,15 @@
              (trap! :fuel-exhausted {:limit fuel :host-stack-exhausted true})
              (throw e))))))))
 
-(defn lower [hir]
+(defn lower
+  "Lower HIR to runtime KIR, sealing a pure entry's oracle value.
+
+  `:oracle-fuel` is the budget for that sealing execution. Pass the artifact's
+  declared fuel to make it agree with what `kotoba.verifier` will re-derive
+  under; omit it for `default-oracle-fuel`, which is what every caller got
+  before this option existed."
+  ([hir] (lower hir nil))
+  ([hir opts]
   (hir/validate! hir)
   (reject-core-form-shape-violations! hir)
   (reject-loop-helper-self-calls-off-tail! hir)
@@ -5296,7 +5322,8 @@
         ;; `kotoba.verifier`'s own re-execution comparable to it directly.
         value (when (and (:entry hir) (contains? #{:i64 :bool} (:result hir))
                          (empty? (:effects hir)) (not kernel-native?))
-                (execute base (:entry hir) [] {:fuel oracle-fuel}))]
+                (execute base (:entry hir) []
+                         {:fuel (or (:oracle-fuel opts) default-oracle-fuel)}))]
     (assoc base
            :oracle-value value
            ;; `:blocks` is the INTERNAL representation and keeps the 0/1 word,
@@ -5308,4 +5335,4 @@
                                                           (if value 1 0)
                                                           value)]
                                             [:return]]}]
-                     []))))
+                     [])))))

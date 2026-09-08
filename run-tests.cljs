@@ -28,6 +28,9 @@
             ;; counter, so this one has to run HERE and not only on the JVM
             [kotoba.kir-fuel64-test]
             [kotoba.kir-host-stack-trap-test]
+            ;; the constant oracle's budget is the caller's, not a private
+            ;; constant -- and it must still refuse when nothing is named
+            [kotoba.kir-oracle-fuel-budget-test]
             ;; the language-owned order over an i64, which `compare` could
             ;; not compute for a bigint
             [kotoba.kir-i64-order-test]
@@ -61,6 +64,7 @@
              'kotoba.kir-firmware-store-test
              'kotoba.kir-fuel64-test
              'kotoba.kir-host-stack-trap-test
+             'kotoba.kir-oracle-fuel-budget-test
              'kotoba.kir-i64-order-test
              'kotoba.kir-image-address-test
              'kotoba.kir-kernel-memory-test
