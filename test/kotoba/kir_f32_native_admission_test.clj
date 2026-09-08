@@ -30,7 +30,7 @@
     *-to-i64-truncating       three answers on an out-of-domain input: x86
                               yields INT64_MIN, AArch64 saturates, this
                               interpreter traps."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]

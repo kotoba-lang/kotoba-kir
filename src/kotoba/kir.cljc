@@ -6,7 +6,7 @@
   ;; is conditional and the branch doesn't match -- fails ns-form spec
   ;; validation ("Extra input spec: :clojure.core.specs.alpha/ns-form",
   ;; confirmed live).
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.hir :as hir]
             [kotoba.kir.value :as value]
             [kotoba.kir.iq-codebook :as iq]

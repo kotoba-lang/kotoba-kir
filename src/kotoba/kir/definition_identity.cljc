@@ -95,7 +95,7 @@
 
   Identity payloads are versioned, and version 2 CIDs are deliberately not
   version 1 CIDs."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [cbor.core :as cbor]
             [multiformats.core :as mf]))
 
@@ -267,7 +267,7 @@
     ;; make the same KIR encode differently per implementation. The explicit
     ;; form is the only admitted representation, and `f64-bits-hex` exists so
     ;; a frontend can produce it.
-    (f64-literal? value) ["f64" (str/lower-case (get value f64-wrapper-key))]
+    (f64-literal? value) ["f64" (str/lower (get value f64-wrapper-key))]
 
     ;; Same tag as a plain integer: `(i64 5)` and `5` denote one value, so they
     ;; must share one identity. The wrapper is about how the value survives a
