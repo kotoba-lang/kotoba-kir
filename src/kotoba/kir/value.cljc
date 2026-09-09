@@ -88,7 +88,37 @@
 (def compact-graph-item-limit 128)
 (def string-index-key-byte-limit 65536)
 (def document-depth-limit 8)
-(def document-node-limit 256)
+;; Raised 256 -> 4096 on 2026-09-10, and given the reason it never had.
+;;
+;; The BOUND is a property: a document must be structurally bounded, and
+;; `document-utf8-byte-limit` below does not provide it -- that budget charges
+;; text only, so a document of 65,536 empty nodes passes it. This is the only
+;; thing bounding the shape.
+;;
+;; The NUMBER was not derived. 256 sat beside `canonical-list-total-item-limit`
+;; 16384 and `canonical-indirect-byte-limit` 1048576 in this same file, two and
+;; four orders of magnitude looser, with nothing saying why documents were the
+;; tight one.
+;;
+;; What it cost: a Kotoba screen. Measured in adr-2608690000, the todo layout
+;; filled at about SEVEN ROWS, and that ADR says outright the answer is "too
+;; small to claim cljs equivalence". Measured again independently on
+;; 2026-09-10 with a four-column table: 7 rows at 256, 123 at 4096, 399 at
+;; 16384.
+;;
+;; Why 4096 and not more: it is the smallest power of two that clears a
+;; realistic screen with headroom, it stays 4x below this file's own aggregate
+;; structural bound (16384), and it is cheap -- validating 33,825 nodes takes
+;; 8.5 ms and 11.7 MB, so 4096 is roughly 1.5 ms and 1.5 MB. Raising it further
+;; is now a one-line change with a guard behind it, which is the argument for
+;; being conservative here rather than generous.
+;;
+;; ⚠ This number is RESTATED in `kotoba.script` as `max-document-nodes`,
+;; because the ESM emitter writes it into every artifact it emits and an
+;; emitted module has no classpath. Changing one alone compiles and then traps
+;; at runtime -- measured, which is why amu's `value_bounds_agreement_test`
+;; now compares them.
+(def document-node-limit 4096)
 (def document-container-item-limit 32)
 (def document-utf8-byte-limit 65536)
 
