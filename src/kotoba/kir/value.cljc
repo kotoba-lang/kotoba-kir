@@ -784,7 +784,9 @@
   needle is refused by the caller (KIR traps on it), mirroring
   :empty-string-search-needle. Strings are CLJC strings here; the byte
   offset is derived by walking code-point boundaries exactly as
-  utf8-substring! does, so astral and multi-byte prefixes compose."
+  utf8-substring! does -- including the two-unit advance over a surrogate
+  pair, which is what makes astral prefixes compose (see the note in the
+  walk)."
   [value needle]
   (let [_check (utf8-byte-count! value)
         _check-needle (utf8-byte-count! needle)]
@@ -793,17 +795,39 @@
       (if (neg? host-idx)
         -1
         ;; host index is a UTF-16 unit index; convert to UTF-8 byte offset.
+        ;;
+        ;; A surrogate PAIR is two UTF-16 units and four UTF-8 bytes, so the
+        ;; walk has to advance by the unit count as well as charge the byte
+        ;; count -- exactly the `[units bytes]` shape `utf8-substring!` above
+        ;; uses. Until 2026-09-09 this loop charged 4 for the high surrogate
+        ;; and then walked onto the LOW surrogate, which fell through to the
+        ;; `:else` arm and charged 3 more: every astral code point before the
+        ;; match added 7 bytes instead of 4.
+        ;;
+        ;; Measured that day on `(string-index-of "𝄞ab" "ab")`: this answered
+        ;; 7, while kotoba-script's JS emitter answered 4 and so did
+        ;; kotoba-native's `string-index-of` lowering -- three implementations,
+        ;; and the reference was the one that was wrong. Nothing caught it
+        ;; because no astral haystack had ever been asked for; the
+        ;; multi-byte rows all used 2- and 3-byte code points, which this loop
+        ;; handled correctly.
+        ;;
+        ;; `utf8-byte-count!` has already run over both strings above, so an
+        ;; unpaired surrogate on either side has been refused and every high
+        ;; surrogate reached here is followed by its low one. That is also why
+        ;; the host index can only ever land ON a code-point boundary, so the
+        ;; `>=` below can never overshoot into the middle of a pair.
         (loop [i 0 byte-index 0]
           (if (>= i host-idx)
             byte-index
             (let [unit #?(:clj (int (.charAt ^String value i))
                           :cljs (.charCodeAt value i))
-                  bytes (cond
-                          (<= unit 0x7f) 1
-                          (<= unit 0x7ff) 2
-                          (<= 0xd800 unit 0xdbff) 4
-                          :else 3)]
-              (recur (+ i 1) (+ byte-index bytes))))))
+                  [units bytes] (cond
+                                  (<= unit 0x7f) [1 1]
+                                  (<= unit 0x7ff) [1 2]
+                                  (<= 0xd800 unit 0xdbff) [2 4]
+                                  :else [1 3])]
+              (recur (+ i units) (+ byte-index bytes))))))
       -1)))
 
 (defn utf8-code-point-at!
