@@ -213,6 +213,36 @@
 ;; below and each backend desugars into exactly them.
 (def ^:private native-word-field-types #{:i64 :bool :string :keyword :document})
 
+(def native-float-boundary-types
+  "Float types a native function may declare as a PARAMETER or RESULT.
+
+  `native-word-field-types`'s own comment gives the reason `:f64` stays out of
+  a record FIELD, and that reason does not reach here: a field \"would have to
+  say which width its one word carries, and no field's declared type is read at
+  runtime\". A signature is the opposite case. The width IS the declared type,
+  it is read at compile time by the caller and the callee alike, and it never
+  needs a runtime tag -- which is exactly why `native-f64-arithmetic-operations`
+  could already compute on floats in machine words while no function could say
+  it took one.
+
+  Measured 2026-09-09 on amu with kotoba-native's aarch64 backend, before the
+  change: `(defn add2 [x :i64 y :i64] :i64 (f64-to-bits (f64-add (f64-from-bits
+  x) (f64-from-bits y))))` compiled and ran, and the SAME arithmetic written as
+  `(defn add2 [x :f64 y :f64] :f64 (f64-add x y))` was refused with \"typed
+  values currently require the kotoba-script web target ...\". The bits were
+  always allowed through; only the declaration was not. `kotoba-lang/aiueos`'s
+  qwen35 kernels are written in the bit-word idiom for this reason, and
+  `kotoba-lang/inference`'s `kernel_math_core.kotoba` says the language
+  \"rejects f64 expressions\" -- which was an implementation state, and is now
+  wrong in both halves.
+
+  `:f32` is NOT admitted by this increment. Both widths are one word and the
+  argument above covers both, but only `:f64` was measured end to end here,
+  and an admission is a claim about what a backend lowers, not about what an
+  argument covers."
+  #{:f64})
+
+
 ;; Structural shape check only (`[:record :qualified/kw [[:field :type] ...]]`)
 ;; -- deliberately does not re-derive `kotoba.compiler.frontend`'s own
 ;; `record-type?`/`validate-value-type!` (that generic check already ran
@@ -494,6 +524,7 @@
                (get schemas (second type) type)
                type)]
     (or (contains? #{:i64 :string :keyword} type)
+        (contains? native-float-boundary-types type)
         ;; `:bool` reaches admission through here: `native-word-value-type?`
         ;; has always listed it, and the `(not= :bool type)` guard that used to
         ;; wrap this whole `or` is what withheld it.
@@ -1055,6 +1086,7 @@
                    ;; extensions test pins it. The same reasoning excludes an
                    ;; option/result there: those are pair handles too.
                    (or (contains? #{:i64 :string :bool} result)
+                       (contains? native-float-boundary-types result)
                        (and exported?
                             (not= name (:entry hir))
                             (empty? params)

@@ -16,6 +16,7 @@
             ;; `kir.xml` -- four `.cljc` sources verified on one host,
             ;; all four closed by porting this single file.
             [kotoba.kir-test]
+            [kotoba.kir-f64-boundary-test]
             [kotoba.kir-alpha-normalization-test]
             [kotoba.kir-cljs-i64-ashr-test]
             ;; the six collection primitives the friendly heads had nothing to
@@ -65,7 +66,8 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.kir-test
-             'kotoba.kir-alpha-normalization-test
+             'kotoba.kir-f64-boundary-test
+   'kotoba.kir-alpha-normalization-test
              'kotoba.kir-cljs-i64-ashr-test
              'kotoba.kir-collection-primitive-test
              'kotoba.kir-core-form-shape-test
