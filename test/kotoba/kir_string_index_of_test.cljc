@@ -67,7 +67,22 @@
   ;; "héllo " is h(1) é(2) l l o space = 7 bytes, so "wö" starts at byte 7
   ;; -- the same haystack/needle the JS emitter and the wasm typed host are
   ;; measured against. A UTF-16 answer would say 6.
-  (is (= 7 (w (run '(string-index-of "héllo wörld" "wö"))))))
+  (is (= 7 (w (run '(string-index-of "héllo wörld" "wö")))))
+  ;; A 4-byte code point -- the width this walk got wrong until 2026-09-09.
+  ;; "\U0001D11E" (G clef) is ONE code point, TWO UTF-16 units and FOUR UTF-8
+  ;; bytes, so "ab" starts at byte 4. The old walk charged the high surrogate
+  ;; 4 and then charged the low surrogate 3 more and answered 7; a UTF-16
+  ;; answer would say 2, and a code-point answer would say 1. Three wrong
+  ;; answers, all plausible, which is why the row is here.
+  (is (= 4 (w (run '(string-index-of "𝄞ab" "ab")))))
+  ;; Two of them, to catch a fix that skips one unit too few or too many.
+  (is (= 8 (w (run '(string-index-of "𝄞𝄞ab" "ab")))))
+  ;; The astral code point AFTER the match must not be walked at all.
+  (is (= 0 (w (run '(string-index-of "ab𝄞" "ab")))))
+  ;; An astral needle, found after an astral prefix.
+  (is (= 4 (w (run '(string-index-of "𝄞𝄢" "𝄢")))))
+  ;; And mixed widths on the way to the match: a(1) é(2) 日(3) 𝄞(4) = 10.
+  (is (= 10 (w (run '(string-index-of "aé日𝄞z" "z"))))))
 
 (deftest index-of-lowers-through-the-constant-oracle
   ;; The gap this file closes: a PURE entry is folded by `lower`, and the
@@ -77,7 +92,11 @@
   ;; ...and the folded value is a genuine i64 in the surrounding arithmetic
   ;; and comparison, on both hosts.
   (is (= 8 (w (fold '(+ (string-index-of "héllo wörld" "wö") 1)))))
-  (is (= 1 (w (fold '(if (= (string-index-of "héllo wörld" "wö") 7) 1 0))))))
+  (is (= 1 (w (fold '(if (= (string-index-of "héllo wörld" "wö") 7) 1 0)))))
+  ;; The astral case through the FOLD as well: the oracle is what a pure
+  ;; entry compiles to, so a wrong byte offset here becomes a wrong constant
+  ;; baked into an artifact rather than a wrong answer at runtime.
+  (is (= 4 (w (fold '(string-index-of "𝄞ab" "ab"))))))
 
 #?(:cljs
    (deftest index-of-answers-a-bigint-on-clojurescript
