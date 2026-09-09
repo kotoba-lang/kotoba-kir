@@ -27,6 +27,11 @@
             [kotoba.kir-core-form-shape-test]
             ;; dequant-iq: the four codebook formats, element by element
             [kotoba.kir-dequant-iq-test]
+            ;; the descriptor encoding, and the capability table it builds --
+            ;; the one place a capability id is deduplicated, ordered and
+            ;; grouped, and therefore the one place a JS BigInt id met three
+            ;; cljs.core operations that refuse one
+            [kotoba.kir-descriptor-test]
             [kotoba.kir-document-container-index-test]
             [kotoba.kir-document-sha256-test]
             ;; fwstore: the allocation that answers with an address
@@ -72,6 +77,7 @@
              'kotoba.kir-collection-primitive-test
              'kotoba.kir-core-form-shape-test
              'kotoba.kir-dequant-iq-test
+             'kotoba.kir-descriptor-test
              'kotoba.kir-document-container-index-test
              'kotoba.kir-document-sha256-test
              'kotoba.kir-firmware-store-test

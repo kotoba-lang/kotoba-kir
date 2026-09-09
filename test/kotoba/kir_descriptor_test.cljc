@@ -7,9 +7,24 @@
   integer `kind` and therefore cannot carry a capability whose request is a
   variant or a record. Two readers make the encoding a wire contract, and a
   wire contract needs its own test: if the encoder and a future decoder are
-  only ever checked against each other, they can agree on the same mistake."
-  (:require [clojure.test :refer [deftest is testing]]
+  only ever checked against each other, they can agree on the same mistake.
+
+  `.cljc` since 2026-09-09, and registered in `run-tests.cljs`. It was `.clj`,
+  which is why `capability-contracts` could throw on ClojureScript for over a
+  month with a green suite: the one host where a capability id is a JS BigInt
+  was the one host this file never reached."
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing]])
             [kotoba.kir.descriptor :as descriptor]))
+
+;; The id a compiler actually puts in a `typed-cap-call` form: an i64 KIR
+;; value, which is a `Long` on the JVM and a JS `BigInt` on ClojureScript.
+;; Every capability test below goes through this rather than through a literal
+;; integer, because a literal is a plain Number on ClojureScript and a plain
+;; Number is precisely the input that never showed the defect.
+(defn- wire-id [n]
+  #?(:clj n :cljs (js/BigInt n)))
+
 
 ;; ---------------------------------------------------------------------------
 ;; Primitives and aliases
@@ -71,7 +86,7 @@
             (descriptor/encode-descriptor [:record :a/r [[:y :string] [:x :i64]]]))))
 
 (deftest an-unknown-descriptor-is-refused-rather-than-encoded-as-something-else
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
                (descriptor/encode-descriptor [:tuple :i64 :i64]))
       "an unknown STRUCTURE is named in a phase-tagged rejection")
   ;; An unknown bare keyword is refused too, but by falling into `first` rather
@@ -81,7 +96,7 @@
   ;; behaviour change, and tightening the diagnostic here would make the move a
   ;; behaviour change wearing a refactor's commit message. It matters more now
   ;; that a second reader is coming, so it is worth fixing -- separately.
-  (is (thrown? IllegalArgumentException
+  (is (thrown? #?(:clj IllegalArgumentException :cljs js/Error)
                (descriptor/encode-descriptor :not-a-type))))
 
 ;; ---------------------------------------------------------------------------
@@ -108,9 +123,71 @@
     (is (= 7 (:id (first contracts))))
     (is (= :string (:request-type (first contracts))))))
 
+;; --- the two-capability regression ----------------------------------------
+;;
+;; ONE capability is what this file used to check, and one capability is
+;; exactly the case that works. With two, `sort-by` compared two JS BigInts
+;; and threw "Cannot compare 23 to 7", which surfaced as
+;; `amu compile --target wasm32-browser` exiting 70 with "internal compiler
+;; error" for any module declaring two or more capabilities -- while the same
+;; module compiled and ran on aarch64-macos, because no native path builds
+;; this table. Measured 2026-09-09 against amu 6ffc1d71.
+
+(defn- ids-of [forms]
+  (mapv :id (descriptor/capability-contracts
+             (kir (cons '+ forms)))))
+
+(deftest two-capability-ids-are-ordered-by-VALUE-not-by-spelling
+  ;; 7 and 23 are `:clock/now` and `:entropy/draw`, the pair the compiler
+  ;; failed on. They are also the pair that tells a numeric order from a
+  ;; textual one: "23" sorts before "7" as text, and 7 before 23 as a number.
+  (is (= [(wire-id 7) (wire-id 23)]
+         (ids-of [(list 'typed-cap-call (wire-id 23) :i64 :i64 1)
+                  (list 'typed-cap-call (wire-id 7) :i64 :i64 1)])))
+  (is (= [(wire-id 7) (wire-id 23)]
+         (ids-of [(list 'typed-cap-call (wire-id 7) :i64 :i64 1)
+                  (list 'typed-cap-call (wire-id 23) :i64 :i64 1)]))
+      "and the answer does not depend on the order the forms were written in"))
+
+(deftest ten-capability-ids-outgrow-the-linear-collection-and-are-still-ordered
+  ;; `distinct` and `group-by` hold eight or fewer entries in a linear array
+  ;; collection and only hash past that, so a table of nine or more is a
+  ;; DIFFERENT failure from the one above: `Cannot create property
+  ;; 'closure_uid_...' on bigint'. Ten ids, written backwards.
+  (is (= (mapv wire-id (range 1 11))
+         (ids-of (for [n (reverse (range 1 11))]
+                   (list 'typed-cap-call (wire-id n) :i64 :i64 1))))))
+
+(deftest the-same-capability-called-twice-is-still-one-contract
+  ;; The `distinct` step, with an id this host cannot hash.
+  (is (= [(wire-id 7) (wire-id 23)]
+         (ids-of [(list 'typed-cap-call (wire-id 23) :i64 :i64 1)
+                  (list 'typed-cap-call (wire-id 7) :i64 :i64 1)
+                  (list 'typed-cap-call (wire-id 23) :i64 :i64 2)]))))
+
+(deftest the-id-is-carried-through-unchanged
+  ;; Only the ORDERING and GROUPING keys are narrowed to a host integer. The
+  ;; contract still carries the KIR value it was given, because the encoder
+  ;; downstream (`uleb`, via `kotoba.wasm.typed/metadata-bytes`) is entitled
+  ;; to see it.
+  (let [id (:id (first (descriptor/capability-contracts
+                        (kir (list 'typed-cap-call (wire-id 7) :i64 :i64 1)))))]
+    (is (= (wire-id 7) id))
+    #?(:cljs (is (identical? js/BigInt (.-constructor id))
+                 "still a BigInt, not narrowed in place"))))
+
 (deftest one-capability-id-may-not-carry-two-contracts
   ;; The invariant that lets a module name a capability by id alone.
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
                (descriptor/capability-contracts
                 (kir '(+ (typed-cap-call 7 :string :string "x")
-                         (typed-cap-call 7 :i64 :i64 1)))))))
+                         (typed-cap-call 7 :i64 :i64 1))))))
+  (testing "and it still fires for the id a compiler actually holds"
+    ;; The grouping step, which is the third place a BigInt id was hashed.
+    ;; A refusal that stops firing is not a smaller defect than a compile that
+    ;; stops working.
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
+                 (descriptor/capability-contracts
+                  (kir (list '+
+                             (list 'typed-cap-call (wire-id 7) :string :string "x")
+                             (list 'typed-cap-call (wire-id 7) :i64 :i64 1))))))))

@@ -220,6 +220,68 @@
   (into {} (map-indexed (fn [index descriptor] [descriptor index])
                         (descriptor-table kir))))
 
+;; A capability id is an i64 KIR value, so on ClojureScript it is a JS
+;; BigInt -- and cljs.core can do neither of the two things a collection does
+;; with a value it is asked to deduplicate, order, or group by:
+;;
+;;   (hash    (js/BigInt 7))              throws "Cannot create property
+;;                                        'closure_uid_...' on bigint '7'"
+;;   (compare (js/BigInt 7) (js/BigInt 23)) throws "Cannot compare 23 to 7"
+;;
+;; `capability-contracts` reached both. Measured 2026-09-09 under nbb:
+;;
+;;   step      threw at            because
+;;   distinct  9 distinct ids      a set of 8 or fewer is a linear array set;
+;;                                 past that it hashes
+;;   sort-by   the SECOND contract `compare` on the `juxt` vector's first slot
+;;   group-by  9 distinct ids      same array-map/hash-map threshold
+;;
+;; The middle one is the one that fired in practice, and it fired at TWO
+;; capabilities: `amu compile --target wasm32-browser` answered `internal
+;; compiler error` (exit 70) for every module declaring two or more
+;; capabilities, while the same module compiled and ran on aarch64-macos --
+;; the native path never builds this table.
+;;
+;; The narrowing is `host-integer`, the same exact, fail-closed conversion
+;; `uleb` already applies to this very id one call later, so nothing new is
+;; assumed about the value. Only the KEYS are narrowed; `:id` itself is
+;; carried through untouched, because it is a KIR value and the encoder
+;; downstream is entitled to see the value it was given.
+
+(defn- contract-id
+  "The capability id as a key a host collection can hash and order."
+  [contract]
+  (host-integer (:id contract)))
+
+(defn- contract-identity
+  "What makes two contracts the same contract. `distinct`'s question, asked
+  of a value whose id has been narrowed; the request and result types are
+  keywords and vectors of keywords, which both hosts already hash."
+  [contract]
+  [(contract-id contract) (:request-type contract) (:result-type contract)])
+
+(defn- contract-order
+  "The canonical order of the table. Identical to the `(juxt :id (comp pr-str
+  :request-type) (comp pr-str :result-type))` this replaces -- on the JVM
+  `host-integer` is `identity`, so the emitted bytes do not move."
+  [contract]
+  [(contract-id contract)
+   (pr-str (:request-type contract))
+   (pr-str (:result-type contract))])
+
+(defn- distinct-contracts
+  "`distinct` over `contract-identity`, first occurrence winning."
+  [contracts]
+  (:out (reduce (fn [{:keys [seen] :as acc} contract]
+                  (let [identity* (contract-identity contract)]
+                    (if (contains? seen identity*)
+                      acc
+                      (-> acc
+                          (update :seen conj identity*)
+                          (update :out conj contract)))))
+                {:seen #{} :out []}
+                contracts)))
+
 (defn capability-contracts
   "Returns the sealed typed capability contracts used by KIR. One capability
   id has exactly one request/result contract per module."
@@ -230,11 +292,13 @@
                                (when (and (seq? form) (= 'typed-cap-call (first form)))
                                  (let [[_ id request-type result-type] form]
                                    {:id id :request-type request-type :result-type result-type}))))
-                       distinct
-                       (sort-by (juxt :id (comp pr-str :request-type) (comp pr-str :result-type)))
+                       distinct-contracts
+                       (sort-by contract-order)
                        vec)]
-    (doseq [[id grouped] (group-by :id contracts)]
+    (doseq [grouped (vals (group-by contract-id contracts))]
       (when (> (count grouped) 1)
         (throw (ex-info "typed capability id has conflicting contracts"
-                        {:phase :kir-descriptor :capability id :contracts grouped}))))
+                        {:phase :kir-descriptor
+                         :capability (:id (first grouped))
+                         :contracts grouped}))))
     contracts))
