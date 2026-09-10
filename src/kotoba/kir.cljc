@@ -835,13 +835,29 @@
                   ;; shift onto CL without a mask. The frontend refuses a
                   ;; non-literal count too, but this predicate is what native
                   ;; admission trusts, so it does not assume that.
+                  ;; Widened 2026-09-10 to admit a NON-LITERAL count. The
+                  ;; comment above gives the restriction's reason as "what lets
+                  ;; a backend lower them onto CL without a mask" -- which is a
+                  ;; statement about one lowering, not about the operation, and
+                  ;; it made variable-count shift and rotate inexpressible.
+                  ;;
+                  ;; A literal count keeps its compile-time range check, so an
+                  ;; out-of-range constant is still refused here rather than
+                  ;; trapping at run time. A computed count is walked like any
+                  ;; other operand, and the backend owes a range guard: this
+                  ;; namespace TRAPS on a count outside [0,63]
+                  ;; (`:i64-shift-count-out-of-range`) while x86 CL is taken
+                  ;; mod 64, so an unguarded lowering would disagree with this
+                  ;; interpreter -- the sealed oracle failure the x86 emitter's
+                  ;; own comment warns about two paragraphs above its shifts.
                   (contains? '#{i64-shift-left i64-shift-right u64-shift-right} op)
                   (let [[value shift] args]
                     (and (= 2 (count args))
-                         #?(:clj (integer? shift)
-                            :cljs (or (i64/bigint-value? shift) (integer? shift)))
-                         (<= 0 shift 63)
-                         (walk value)))
+                         (walk value)
+                         (if #?(:clj (integer? shift)
+                                :cljs (or (i64/bigint-value? shift) (integer? shift)))
+                           (<= 0 shift 63)
+                           (walk shift))))
                   (= op 'option-some)
                   (and (= 1 (count args)) (walk (first args)))
                   (= op 'option-none)
