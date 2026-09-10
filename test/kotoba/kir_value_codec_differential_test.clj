@@ -145,3 +145,66 @@
           (str "canonical-bytes is exactly (cbor/encode (normalize payload)) "
                "over the same cbor.core io-ipld uses; the divergence is above "
                "the codec, not in it")))))
+
+;; ---------------------------------------------------------------------------
+;; What a naive payload v3 would do, measured
+;; ---------------------------------------------------------------------------
+
+(deftest a-naive-payload-v3-encodes-every-float-and-large-integer-as-a-map
+  ;; The three dimensions above are byte-level: a migration pays them once and
+  ;; every CID moves, which is the cost already on the record. This is a
+  ;; DIFFERENT thing and it is not a cost, it is a defect waiting for whoever
+  ;; performs the swap.
+  ;;
+  ;; `normalize` carries an f64 as `{::f64 "<16 hex>"}` and an out-of-range i64
+  ;; as `{::i64 "<decimal>"}` -- ordinary Clojure MAPS whose keys this
+  ;; namespace's identity docstring says must keep the pre-extraction
+  ;; namespace, because changing them "would reinterpret old frozen definitions
+  ;; as ordinary maps and therefore move their DefCIDs".
+  ;;
+  ;; `value->form` does not know those wrappers. Measured 2026-09-10, it does
+  ;; not refuse them either: it accepts each one as what it structurally is, a
+  ;; one-entry map, and encodes the wrapper KEYWORD into the block. So a v3
+  ;; that hands `identity-payload` straight to the value model produces a
+  ;; block that encodes, round-trips, and has quietly replaced every float with
+  ;; a map containing a magic keyword -- the accepted-but-wrong case, not the
+  ;; refused one.
+  ;;
+  ;; The work item this names: v3 must unwrap into `value/float64` and
+  ;; `value/int64` BEFORE encoding. It is one conversion, but nothing fails if
+  ;; it is forgotten.
+  (testing "an f64 literal"
+    (let [wrapper (identity/f64 1.5)
+          naive (value/value->form wrapper)
+          native (value/value->form (value/float64 1.5))]
+      (is (= ["f64" "3ff8000000000000"] (identity/normalize wrapper))
+          "normalize tags it as a float")
+      (is (= value/code-map (first naive))
+          "value->form did not refuse the wrapper; it took it for a map")
+      (is (= value/code-float (first native))
+          "the value model does have a float; the wrapper simply never reaches it")
+      (is (not= (hex (cbor/encode naive)) (hex (cbor/encode native)))
+          "so the two are different blocks for one value")
+      (is (clojure.string/includes?
+           (hex (cbor/encode naive))
+           (hex (.getBytes "kotoba.lang.code-identity/f64" "UTF-8")))
+          "and the wrapper keyword is inside the block a DefCID would address")))
+
+  (testing "an i64 outside the exactly-representable range"
+    (let [wrapper (identity/i64 9223372036854775807)
+          naive (value/value->form wrapper)]
+      (is (= ["int" "9223372036854775807"] (identity/normalize wrapper))
+          "normalize tags it as an integer")
+      (is (= value/code-map (first naive))
+          "value->form took it for a map here too")
+      (is (= value/code-int64 (first (value/value->form (value/int64 9223372036854775807))))
+          "the value model has an exact i64; the wrapper never reaches it")))
+
+  (testing "and the encoder is not simply accepting everything"
+    ;; The discriminating control. If `value->form` admitted every input, the
+    ;; assertions above would say nothing about wrappers in particular.
+    (is (= :value/integer-out-of-range
+           (try (value/value->form 9223372036854775807)
+                nil
+                (catch clojure.lang.ExceptionInfo e (:problem (ex-data e)))))
+        "a raw out-of-range integer IS refused, so acceptance above is a fact about the wrapper")))
