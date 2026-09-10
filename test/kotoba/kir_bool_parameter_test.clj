@@ -149,15 +149,53 @@
     (is (true? (kir/only-native-word-typed-features? hir))
         "both established tagged pair aliases are one-word export boundaries")))
 
+(defn- one-param-hir
+  "Two functions, the second an entry, so the only thing that varies is the
+  declared parameter type of the first."
+  [t]
+  {:format :kotoba.hir/v3 :entry 'main :exports ['main 'g]
+   :functions [{:name 'g :params ['x] :param-types [t] :result :i64
+                :body '(if 1 1 0)}
+               {:name 'main :params [] :param-types [] :result :i64
+                :body '(if 1 1 0)}]})
+
 (deftest the-native-gate-still-refuses-what-it-always-refused
-  ;; Widening one type must not widen the set by accident. `:f64` is a word too,
-  ;; but it is not a word this boundary carries.
-  (let [hir {:format :kotoba.hir/v3 :entry 'main :exports ['main 'g]
-             :functions [{:name 'g :params ['x] :param-types [:f64] :result :i64
-                          :body '(if 1 1 0)}
-                         {:name 'main :params [] :param-types [] :result :i64
-                          :body '(if 1 1 0)}]}]
-    (is (false? (kir/only-native-word-typed-features? hir)))))
+  ;; Widening one type must not widen the set by accident.
+  ;;
+  ;; This test's counterexample WAS `:f64` until 2026-09-09, when 8c6e3dbc
+  ;; admitted it at a SIGNATURE deliberately -- measured end to end, with the
+  ;; aarch64 disassembly in its message -- and did not touch this file. The
+  ;; guard was then asserting that an intended admission had not happened.
+  ;;
+  ;; Something DID say so, which is worth recording accurately: measured
+  ;; 2026-09-10, this repository has Actions enabled, the `test` job ran on
+  ;; every push, and it reported failure on main five runs running -- naming
+  ;; this deftest by name. What is missing is not the signal. `main` carries no
+  ;; branch protection, so a red main is a report and not a gate, and four more
+  ;; merges landed on top of it.
+  ;;
+  ;; So the guard is no longer ONE EXAMPLE. It is the SET, because the example
+  ;; is what went stale: a type can be admitted without this file being opened,
+  ;; but the set cannot.
+  (is (= #{:f64} kir/native-float-boundary-types)
+      (str "the float boundary widened. That may well be right -- but it has to be "
+           "DELIBERATE, so add the type here together with the end-to-end "
+           "measurement that admits it, the way :f64 was on 2026-09-09. A widening "
+           "that no guard had to be opened for is the one this test exists to catch."))
+
+  ;; The next word that IS a word and is NOT carried.
+  ;; `native-float-boundary-types`'s own docstring names it and says why: both
+  ;; widths are one word and the argument covers both, but only :f64 was
+  ;; measured end to end, and an admission is a claim about what a backend
+  ;; lowers rather than about what an argument covers.
+  (is (false? (kir/only-native-word-typed-features? (one-param-hir :f32)))
+      ":f32 was admitted without native lowering measured for it")
+
+  ;; Paired deliberately. A gate that had been closed to every float would
+  ;; satisfy the refusal above on its own, and this deftest would then report a
+  ;; guard that is only ever a one-way claim.
+  (is (true? (kir/only-native-word-typed-features? (one-param-hir :f64)))
+      "the float boundary closed; :f64 lowers on both native backends"))
 
 ;; ---------------------------------------------------------------------------
 ;; What is still not closed, measured rather than described
