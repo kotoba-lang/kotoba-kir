@@ -208,3 +208,108 @@
                 nil
                 (catch clojure.lang.ExceptionInfo e (:problem (ex-data e)))))
         "a raw out-of-range integer IS refused, so acceptance above is a fact about the wrapper")))
+
+;; ---------------------------------------------------------------------------
+;; What the conversion actually costs, dimension by dimension
+;; ---------------------------------------------------------------------------
+;;
+;; The three dimensions above say the two value models DIFFER. These three say
+;; what a converter would have to do about each one, which is the question the
+;; root gap asks: is v3 possible, and if so what does it cost.
+;;
+;; Two of the three are mechanical. The i64 one is not, and that is the finding:
+;; it is not a formatting difference, it is a disagreement about HOW MANY VALUES
+;; THERE ARE.
+
+(deftest every-normalize-tag-has-a-code-so-nothing-is-blocked-upstream
+  (testing "dimension 1 is a total mapping -- no named blocker waits on io-ipld"
+    ;; Each side is given its OWN representation. Handing normalize a bare
+    ;; platform float and reading its refusal as a missing capability is a
+    ;; mistake this measurement already made once: the refusal is the wrapper
+    ;; contract, not a gap.
+    (doseq [[tag x code]
+            [["nil"   nil                    value/code-nil]
+             ["bool"  true                   value/code-boolean]
+             ["int"   5                      value/code-integer]
+             ["str"   "s"                    value/code-string]
+             ["kw"    :k                     value/code-keyword]
+             ["sym"   'y                     value/code-symbol]
+             ["bytes" (byte-array [1 2 3])   value/code-bytes]
+             ["map"   {"a" 1}                value/code-map]
+             ["set"   #{1}                   value/code-set]
+             ["vec"   [1]                    value/code-vector]
+             ["list"  '(1)                   value/code-list]]]
+      (is (= tag (first (identity/normalize x)))
+          (str "normalize tag for " tag))
+      (is (= code (first (value/value->form x)))
+          (str "codec code for " tag)))
+    ;; f64 is the twelfth tag and each side spells it differently.
+    (is (= "f64" (first (identity/normalize (identity/f64 1.5)))))
+    (is (= value/code-float (first (value/value->form (value/float64 1.5)))))
+    (testing "and both refuse the OTHER's spelling, with their own reason"
+      ;; Pinned literals. When either side renames its refusal this fails, and
+      ;; that is the point: a control that only asserts \"threw\" counts an
+      ;; unrelated failure as a demonstration.
+      (is (= :definition/unencodable-float
+             (:problem (ex-data (try (identity/normalize 1.5)
+                                     (catch clojure.lang.ExceptionInfo e e))))))
+      (is (= :value/unwrapped-number
+             (:problem (ex-data (try (value/value->form 1.5)
+                                     (catch clojure.lang.ExceptionInfo e e)))))))
+    (testing "control -- a value outside BOTH domains is refused by both"
+      (is (= :definition/uncanonical-value
+             (:problem (ex-data (try (identity/normalize (java.util.Date.))
+                                     (catch clojure.lang.ExceptionInfo e e))))))
+      (is (= :value/unsupported-type
+             (:problem (ex-data (try (value/value->form (java.util.Date.))
+                                     (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(deftest normalize-unifies-two-integers-the-codec-splits
+  ;; THE finding. `normalize` says so in its own comment -- "(i64 5) and 5
+  ;; denote one value, so they must share one identity" -- and gives both the
+  ;; same tagged form. The codec gives them different CODES and different
+  ;; BYTES.
+  ;;
+  ;; So a converter cannot be a re-encoding here. It must decide, and both
+  ;; answers cost something:
+  ;;
+  ;;   always emit code-integer  -- keeps normalize's invariant, but then the
+  ;;                                explicit i64 wrapper cannot round-trip and
+  ;;                                values beyond the exact range have no code
+  ;;   emit code-int64 when wrapped -- round-trips, but SPLITS an identity that
+  ;;                                is one today, so (i64 5) and 5 would get
+  ;;                                different DefCIDs
+  ;;
+  ;; That decision is payload v3's only non-mechanical part.
+  (testing "normalize gives one identity"
+    (is (= (identity/normalize 5) (identity/normalize (identity/i64 5))))
+    (is (= ["int" "5"] (identity/normalize 5)))
+    (testing "control -- it does not collapse DIFFERENT integers"
+      (is (not= (identity/normalize 5) (identity/normalize 6)))))
+  (testing "the codec gives two"
+    (is (= value/code-integer (first (value/value->form 5))))
+    (is (= value/code-int64   (first (value/value->form (value/int64 5)))))
+    (is (not= (hex (value/encode-value 5))
+              (hex (value/encode-value (value/int64 5))))
+        "different bytes for what normalize calls one value")
+    (testing "control -- the codec is deterministic, so the inequality above is real"
+      (is (= (hex (value/encode-value 5)) (hex (value/encode-value 5)))))))
+
+(deftest map-key-order-actually-crosses-it-is-not-merely-different
+  ;; Dimension 3 is stated above as "different orders". Different orders could
+  ;; still agree on every key set that occurs. These two CROSS on a two-key
+  ;; map, so the converter must re-sort rather than carry order through.
+  ;;
+  ;;   normalize  rank, then structural compare  -> "aa" < "b"
+  ;;   codec      shorter encoding, then bytes   -> "b"  < "aa"
+  (let [m {"b" 1 "aa" 2}
+        ours   (mapv (comp second first) (second (identity/normalize m)))
+        theirs (mapv (comp second first) (second (value/value->form m)))]
+    (is (= ["aa" "b"] ours))
+    (is (= ["b" "aa"] theirs))
+    (is (= ours (vec (reverse theirs)))
+        "they cross on this witness, so order cannot be carried through")
+    (testing "control -- a single-key map cannot exhibit an order difference"
+      (let [one {"b" 1}]
+        (is (= (mapv (comp second first) (second (identity/normalize one)))
+               (mapv (comp second first) (second (value/value->form one)))))))))
