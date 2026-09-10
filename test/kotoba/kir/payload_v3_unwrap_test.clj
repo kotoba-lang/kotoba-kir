@@ -57,8 +57,27 @@
        (f64-wrapper? node)
        (value/float64 (Double/longBitsToDouble (Long/parseUnsignedLong (get node f64-key) 16)))
 
+       ;; BY MAGNITUDE, not by the wrapper being present.
+       ;;
+       ;; This branch was `(value/int64 ...)` unconditionally, and the only
+       ;; test that reached it used an out-of-range value -- the one case where
+       ;; that is right. Measured 2026-09-11: the compiler's `canonical-value`
+       ;; puts EVERY integer through this wrapper on both hosts (it is passed
+       ;; as kir's `:scalar`, so it reaches every scalar leaf), precisely
+       ;; BECAUSE `(i64 5)` and `5` normalize to the same bytes and it
+       ;; therefore costs nothing. Unconditional int64 makes that false: every
+       ;; integer in every definition becomes an 8-byte code-int64 payload
+       ;; instead of a compact code-integer, and the unification the compiler
+       ;; relies on to erase the JVM/nbb type difference is gone.
+       ;;
+       ;; Deciding by magnitude keeps both: an in-range value encodes exactly
+       ;; as the bare integer does, and code-int64 is spent only where the
+       ;; value model actually needs it.
        (i64-wrapper? node)
-       (value/int64 (Long/parseLong (get node i64-key)))
+       (let [v (Long/parseLong (get node i64-key))]
+         (if (<= value/min-safe-integer v value/max-safe-integer)
+           v
+           (value/int64 v)))
 
        :else node))
    x))
@@ -146,3 +165,55 @@
     (is (not (clojure.string/includes? (bytes-of (unwrap payload)) wrapper-keyword-hex)))
     (is (not= (bytes-of payload) (bytes-of (unwrap payload)))
         "and the two encodings differ, which is what payload v3 would be buying")))
+
+;; ---------------------------------------------------------------------------
+;; The in-range case, which is the one the conversion got wrong
+;; ---------------------------------------------------------------------------
+
+(defn- amu-style
+  "A payload the way `kotoba.compiler.definition-identity/canonical-value`
+   builds one: every host integer replaced by the i64 wrapper. That function is
+   passed to the alpha-normalization walk as `:scalar`, so it reaches every
+   scalar leaf of every definition -- the wrapper is not an occasional
+   annotation, it is where all integers live by the time identity sees them."
+  [p]
+  (walk/postwalk (fn [n] (if (integer? n) (identity/i64 (str n)) n)) p))
+
+(deftest an-in-range-i64-encodes-exactly-as-the-bare-integer
+  (testing "the unification normalize declares is preserved by the conversion"
+    (doseq [n [0 1 -1 5 1000000 value/max-safe-integer value/min-safe-integer]]
+      (is (= (bytes-of n) (bytes-of (unwrap (identity/i64 (str n)))))
+          (str "wrapped and bare must encode identically: " n))))
+  (testing "control -- the wrapper still earns its keep beyond the range"
+    ;; The first version of this control asserted that the bare and wrapped
+    ;; forms encode DIFFERENTLY beyond the range. They do not merely differ:
+    ;; the bare form cannot be encoded at all, which is a stronger fact and the
+    ;; reason the wrapper exists. The refusal literal is pinned, so a rename
+    ;; upstream fails here rather than turning this into a test of nothing.
+    (let [beyond (inc value/max-safe-integer)]
+      (is (= :value/integer-out-of-range
+             (:problem (ex-data (try (bytes-of beyond)
+                                     (catch clojure.lang.ExceptionInfo e e)))))
+          "a bare host integer beyond the range has no encoding")
+      (is (value/int64? (unwrap (identity/i64 (str beyond))))
+          "and the conversion reaches the value model's exact integer")
+      (is (string? (bytes-of (unwrap (identity/i64 (str beyond)))))
+          "which does encode")))
+  (testing "the boundary, exactly"
+    ;; A comparison without a value ON the line cannot show which operator it
+    ;; is using. max-safe-integer must stay compact and max+1 must not.
+    (is (not (value/int64? (unwrap (identity/i64 (str value/max-safe-integer))))))
+    (is (value/int64? (unwrap (identity/i64 (str (inc value/max-safe-integer)))))))) 
+
+(deftest the-conversion-does-not-inflate-a-compiler-shaped-payload
+  (testing "wrapping every integer costs nothing, which is why the compiler does it"
+    (doseq [v vectors]
+      (let [p (identity/identity-payload (:definition v))]
+        (is (= (bytes-of (unwrap p))
+               (bytes-of (unwrap (amu-style p))))
+            (str (:id v) ": a fully wrapped payload must encode as the bare one"))))
+    (testing "control -- the wrappers really were added"
+      (let [p (identity/identity-payload (:definition (first vectors)))
+            n (atom 0)]
+        (walk/postwalk (fn [x] (when (i64-wrapper? x) (swap! n inc)) x) (amu-style p))
+        (is (pos? @n) "amu-style added no wrappers, so the assertion above is vacuous")))))
