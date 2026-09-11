@@ -93,6 +93,6 @@ that is what makes the count informative rather than the failure.
   flattening it, because one `qh` byte serves two 32-element groups and one
   scale byte serves both. Flattening it is exactly the kind of index
   arithmetic the reference exists not to share with the oracle.
-- Registered in `run-tests.cljs`, so it runs on both runtimes. Being required
+- Registered in `run-tests.cljk`, so it runs on both runtimes. Being required
   is not being run — the suite that established that (`kir-rodata-literal`)
   is three entries above it in the same list.

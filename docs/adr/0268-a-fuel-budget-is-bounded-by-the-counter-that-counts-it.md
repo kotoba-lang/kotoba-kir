@@ -137,8 +137,8 @@ No single classpath holds more than two of the four. amu holds all of them, so
 
 ## Evidence
 
-`test/kotoba/kir_fuel64_test.cljc`, run on both runtimes (JVM `clojure -M:test`
-and nbb through `run-tests.cljs`, where the `:cljs` branch asserts the
+`test/kotoba/kir_fuel64_test.cljk`, run on both runtimes (JVM `clojure -M:test`
+and nbb through `run-tests.cljk`, where the `:cljs` branch asserts the
 `x - 1 === x` measurements directly).
 
 The discriminator is the low word: the positive assertions use

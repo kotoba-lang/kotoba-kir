@@ -15,7 +15,7 @@
   2. The ClojureScript host. kir.cljc claims two runtimes, and every i64 the
      `:cljs` branch produces is a BigInt (`i64/->bigint`), but this op's case
      returned the host's plain JS number. Until this file became `.cljc` and
-     was listed in `run-tests.cljs`, that branch had never been executed."
+     was listed in `run-tests.cljk`, that branch had never been executed."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.kir :as ir]
