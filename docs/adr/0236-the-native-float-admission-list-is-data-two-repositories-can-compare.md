@@ -48,7 +48,7 @@ fail.
 
 ## Evidence
 
-`clojure -M:test -n kotoba.kir-test`.
+`kbb -M:test -n kotoba.kir-test`.
 
 The agreement check itself lives in kotoba-verifier
 (`kotoba.verifier-kir-agreement-test`) with its red/green shown there: removing

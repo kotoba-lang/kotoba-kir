@@ -97,7 +97,7 @@ and this one names two regions, no index, and a count of elements to fold.
 
 ## Verification
 
-`clojure -M:test`: 233 tests / 999 assertions, 0 failures across the whole
+`kbb -M:test`: 233 tests / 999 assertions, 0 failures across the whole
 suite; `kotoba.kir-kernel-dot-f32-test` is 15 tests / 43 assertions.
 
 Four independent breaks, each shown to turn the right assertion red by name:
