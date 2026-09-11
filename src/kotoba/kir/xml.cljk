@@ -1,4 +1,5 @@
 (ns kotoba.kir.xml
+  {:kotoba/export [attribute-limit depth-limit name-count name-text node-limit parse-elements path-attr path-count path-segment-limit path-text validate-name! validate-path!]}
   (:require [kotoba.lang.text :as str]
             [kotoba.kir.value :as value]
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))

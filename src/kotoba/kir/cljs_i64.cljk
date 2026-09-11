@@ -18,7 +18,8 @@
   `zero?`/`neg?`/`pos?`/`integer?` do NOT reliably recognize `bigint` in this
   cljs runtime (confirmed live: `(zero? (js/BigInt 0))` => false) -- use
   `k-zero?`/`k-neg?`/`k-pos?`/`bigint-value?` below instead of the cljs.core
-  versions on any value that came from this namespace.")
+  versions on any value that came from this namespace."
+  {:kotoba/export [->bigint ashr bigint-value? in-i64-range? k-neg? k-pos? k-zero? max-i64 min-i64 one wrap-i64 zero]})
 
 (def min-i64 (js/BigInt "-9223372036854775808"))
 (def max-i64 (js/BigInt "9223372036854775807"))

@@ -90,7 +90,8 @@
 
   The safety this gives up -- that identity cannot be computed over
   un-normalized KIR -- is bought back by `verify-normalized!` refusing at the
-  caller, which is also the only place that can check it.")
+  caller, which is also the only place that can check it."
+  {:kotoba/export [alpha-normalize binding-forms canonical-binder contract handles? normalize-function symbols-in verify-normalized!]})
 
 (def contract
   "The versioned shape of what `alpha-normalize` returns. Bumped when that map
