@@ -6,8 +6,13 @@
   #?(:clj (:import [java.nio.charset StandardCharsets]
                    [java.security MessageDigest])))
 
-(def string-literal-byte-limit 4096)
 (def string-value-byte-limit 65536)
+;; A literal is a value: the bound a string may reach at runtime is the bound
+;; a string may be written as. It was 4096 -- 16x below the value bound --
+;; and refused 3 of the compiler'"'"'s own sources (a .wit file held in a def,
+;; 5042 bytes) on the self-host route (measured 2026-09-11, adr-2609111900).
+;; Backends already carry 64 KiB string values, so nothing new is emitted.
+(def string-literal-byte-limit string-value-byte-limit)
 ;; Opaque binary payload bound for kit/runtime `:bytes` (stream-object
 ;; max-pull-bytes). Same magnitude as string-value-byte-limit deliberately.
 (def bytes-value-byte-limit 65536)

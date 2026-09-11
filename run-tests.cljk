@@ -1,4 +1,4 @@
-;; kbb --backend sci --classpath "src:test:$(kbb -Spath -M:test)" run-tests.cljk
+;; nbb --classpath "src:test:$(clojure -Spath -M:test)" run-tests.cljk   ; clojure -Spath only resolves deps, it loads no code
 ;;
 ;; The portable side of this suite. Not most of it: kotoba.kir is `.cljc` and
 ;; claims two runtimes, but every test here was `.clj` and the fleet gate is
@@ -62,7 +62,8 @@
             [kotoba.kir-uleb-i64-test]
             ;; string-upper: the mirror of string-fold-case at the KIR eval
             [kotoba.kir-string-upper-test]
-            [kotoba.kir-uefi-boundary-test]))
+            [kotoba.kir-uefi-boundary-test]
+            [kotoba.kir-string-literal-bound-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -96,4 +97,5 @@
              'kotoba.kir-string-index-of-test
              'kotoba.kir-uleb-i64-test
              'kotoba.kir-string-upper-test
-             'kotoba.kir-uefi-boundary-test)
+             'kotoba.kir-uefi-boundary-test
+   'kotoba.kir-string-literal-bound-test)
