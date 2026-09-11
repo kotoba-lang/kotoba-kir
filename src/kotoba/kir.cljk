@@ -99,7 +99,7 @@
 (def ^:private default-kgraph-capacity 4096)
 (def ^:dynamic *runtime-schemas* nil)
 
-;; Shared between `kotoba.compiler.core` (JVM `clojure -M:run` path) and
+;; Shared between `kotoba.compiler.core` (JVM `kbb -M:run` path) and
 ;; `kotoba.compiler.nbb.cli` (nbb-native fast path) -- both admit
 ;; `:kotoba.hir/v3` (typed) HIR onto the x86_64/aarch64 native backends
 ;; ONLY when the actual features used are limited to string literals +

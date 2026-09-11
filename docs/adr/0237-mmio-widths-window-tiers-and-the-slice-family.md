@@ -123,8 +123,8 @@ operation does: as plain i64 operations through the `:else` arm.
 
 ## Evidence
 
-`clojure -M:test` — 205 tests, 831 assertions, 0 failures.
-`nbb run-tests.cljk` — 57 tests, 153 assertions, 0 failures.
+`kbb -M:test` — 205 tests, 831 assertions, 0 failures.
+`kbb --backend sci run-tests.cljk` — 57 tests, 153 assertions, 0 failures.
 
 Deliberate breaks, each red for its own reason and then restored:
 

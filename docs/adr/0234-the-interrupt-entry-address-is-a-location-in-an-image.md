@@ -46,7 +46,7 @@ that set, and it is why the two changes here are one change.
 
 ## Evidence
 
-`clojure -M:test -n kotoba.kir-kernel-memory-test`: 49 tests, 207 assertions,
+`kbb -M:test -n kotoba.kir-kernel-memory-test`: 49 tests, 207 assertions,
 0 failures.
 
 Two deliberate breaks, each producing the failure it names and no other:
