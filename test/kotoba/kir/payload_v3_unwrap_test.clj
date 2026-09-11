@@ -32,6 +32,7 @@
             [clojure.walk :as walk]
             [cbor.core :as cbor]
             [ipld.value :as value]
+            [kotoba.value.codec :as codec]
             [kotoba.kir.definition-identity :as identity]))
 
 (def ^:private f64-key :kotoba.lang.code-identity/f64)
@@ -217,3 +218,51 @@
             n (atom 0)]
         (walk/postwalk (fn [x] (when (i64-wrapper? x) (swap! n inc)) x) (amu-style p))
         (is (pos? @n) "amu-style added no wrappers, so the assertion above is vacuous")))))
+
+;; ---------------------------------------------------------------------------
+;; The v3 identities, computed and pinned before the decision
+;; ---------------------------------------------------------------------------
+;;
+;; Everything above stops at BYTES. The identity is a CID, and no frozen
+;; vector had ever had its v3 CID computed -- so the question "what will v3
+;; produce" had no answer on the record, and a cutover would have had
+;; nothing to check its regenerated corpus against.
+;;
+;; The CID step is not the trivial part it looks like. Payload v1 hashed
+;; pr-str output and labelled it dag-cbor -- the differential test's header
+;; records that as the mistake this whole line of work exists to avoid. So
+;; the label was checked rather than assumed: kotoba.value.v1's own
+;; `value-cid` labels dag-cbor, and that is honest, because the value model
+;; is a schema ABOVE dag-cbor, not a different wire codec. The bytes decode.
+;;
+;; These ten are what v3 yields under the conversion as it stands today,
+;; magnitude rule included. They are pinned for the same reason the v2 ones
+;; are: so a change to the conversion moves them and is seen, rather than
+;; landing quietly and moving every identity in the workspace on cutover.
+
+(def ^:private v3-definition-cids
+  {
+:pure-const "bafyreieamgm5sswlobfawumytfooy7uwt6pu5solktj6gzhgolvcy3c5qy"
+   :effect-row-http "bafyreiflnucvid5ynuuunrghzwbgt3m4j5k7xc3wwi7hfmmgq2wsnwd72i"
+   :effect-row-two "bafyreie6vy63pwjceokzcke3es6gwm3m3xhvecfspqabhglqtx2ixr6uoe"
+   :desugar-contract-2 "bafyreifu4efjjghp4ffz4yz5wyaxlnujku36x3mrm4izo7khe6l4frzeo4"
+   :profile-5 "bafyreicrr5pgerfxmhurmz36b5syzhscz226ysheuhs3w2t6jcjrhgdyzm"
+   :interface-arity-1 "bafyreigfvd6qxzsbrgzzvwci5zqszu5e4fjx46bhtrxi44bhzbxdgowhya"
+   :dependencies-two "bafyreih4awojuk7pxwwiiu3azbm55mai7wett3lk6a3wzqdgbbnfjv7rcu"
+   :kir-nested-collections "bafyreihebadl7azdjfbvkoc566bbwsnbi5uphdjdxy546gnz2473ewj4ai"
+   :kir-f64 "bafyreihozgcxrtfve2iiw6t7ghvugv7fhctik23qnbejfom4nvz5eca7hq"
+   :kir-keyword-vs-string "bafyreic6kalgdroqp2s7lect63ahhx5lrnka6cruvcpmbuneusligk3yre"})
+
+(deftest every-frozen-vector-has-a-pinned-v3-identity
+  (is (= (count vectors) (count v3-definition-cids))
+      "every vector must have a pinned v3 CID, or the floor below is partial")
+  (doseq [v vectors]
+    (let [v3 (str (codec/value-cid (unwrap (identity/identity-payload (:definition v)))))]
+      (is (= (get v3-definition-cids (:id v)) v3)
+          (str (:id v) ": the v3 identity moved -- the conversion changed, and every "
+               "DefCID would move with it on cutover"))
+      (testing "and it is not the v2 identity"
+        (is (not= (:definition-cid v) v3)
+            (str (:id v) ": v3 equals v2, so the conversion did nothing")))))
+  (testing "ten vectors, ten identities -- the conversion does not collapse any two"
+    (is (= (count vectors) (count (set (vals v3-definition-cids)))))))
