@@ -1,0 +1,15 @@
+(ns kotoba.kir-string-literal-bound-test
+  "2026-09-11 (adr-2609111900): the string LITERAL bound was 4096, 16x under
+  the string VALUE bound, and refused a 5042-byte .wit held in a def on the
+  self-host route. A literal is a value; the two bounds are one number, read
+  from the namespace rather than spelled here."
+  (:require [clojure.test :refer [deftest is]]
+            [kotoba.kir.value :as value]))
+
+(deftest a-string-literal-is-bounded-like-a-string-value
+  (is (= value/string-literal-byte-limit value/string-value-byte-limit))
+  (let [five-k (apply str (repeat 5042 "w"))
+        over (apply str (repeat (inc value/string-literal-byte-limit) "w"))]
+    (is (= five-k (value/bounded-string! five-k value/string-literal-byte-limit)))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs :default)
+                 (value/bounded-string! over value/string-literal-byte-limit)))))
