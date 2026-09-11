@@ -1,4 +1,5 @@
 (ns kotoba.kir
+  {:kotoba/export [*runtime-schemas* eval-expr execute host-stack-exhausted? lower max-fuel native-boundary-type-refusal native-erased-source-carrier-types native-f32-arithmetic-operations native-f32-comparison-operations native-f64-arithmetic-operations native-f64-comparison-operations native-float-boundary-types native-float-width-conversions native-floating-point-operations native-unadmitted-boundary-types non-string-typed-ops only-cljs-provider-typed-features? only-native-word-typed-features? uses-f32? uses-f64?]}
   ;; The whole `:require` clause (not just an item inside it) is behind the
   ;; reader-conditional: on `:clj` this file needs no extra require at all
   ;; (matching the original `(ns kotoba.kir)`), and an EMPTY

@@ -21,7 +21,8 @@
 
   No require: measured after extraction, the descriptor half never touched
   `kotoba.kir.cljs-i64`. Its single use is in `infer-type`, which stays with
-  the wasm-specific half.")
+  the wasm-specific half."
+  {:kotoba/export [boolean-result-ops capability-contracts descriptor-indices descriptor-table descriptor? encode-descriptor keyword-text primitive-tags scalar-adt-aliases text-bytes uleb utf8]})
 
 (def primitive-tags
   {:i64 0 :string 1 :keyword 2 :bool 3 :symbol 19 :vector-i64 11 :f64 12 :f32 13

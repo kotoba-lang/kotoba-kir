@@ -1,4 +1,5 @@
-(ns kotoba.kir.compatibility)
+(ns kotoba.kir.compatibility
+  {:kotoba/export [compiler-version descriptor language-version schema tender-role]})
 
 (def schema :kotoba.compatibility/v1)
 (def compiler-version "kotoba-compiler/1")

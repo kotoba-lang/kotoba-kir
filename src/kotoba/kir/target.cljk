@@ -1,4 +1,5 @@
-(ns kotoba.kir.target)
+(ns kotoba.kir.target
+  {:kotoba/export [backend compatibility-targets profile profiles]})
 
 (def profiles
   {:wasm32-kotoba-v1 {:format :kotoba.target-profile/v1 :execution :wasm :isa :wasm32 :os :unspecified :abi :wasm-mvp :runtime :kototama-capability-host-v1}
