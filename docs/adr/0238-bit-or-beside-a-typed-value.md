@@ -54,7 +54,7 @@ mistaken for a decision.
 
 ## Evidence
 
-`test/kotoba/kir_bit_or_typed_admission_test.clj`, 4 tests / 19 assertions.
+`test/kotoba/kir_bit_or_typed_admission_test.cljk`, 4 tests / 19 assertions.
 Both directions, and shown red: deleting the new case fails
 `bit-or-and-bit-not-are-admitted-beside-a-typed-value` on all three bodies,
 including the `sign | exponent | mantissa` shape that found it.

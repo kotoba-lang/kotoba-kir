@@ -3614,7 +3614,7 @@
         ;; `(if (= (string-index-of "héllo wörld" "wö") 7) 1 0)` folded to 0 --
         ;; a wrong answer with no trap, because `=` saw a number next to a
         ;; BigInt. Pinned by `kir_string_index_of_test.cljc`, which is listed
-        ;; in `run-tests.cljs` so this branch is actually executed.
+        ;; in `run-tests.cljk` so this branch is actually executed.
         (= op 'string-index-of)
         (let [[haystack needle]
               (mapv #(eval-expr % env functions fuel heap call-stack cap-call) args)]
@@ -4958,7 +4958,7 @@
           ;; An i64 is a `long` on the JVM and a BigInt on ClojureScript; a
           ;; plain JS number here reaches the result type check as
           ;; `:value-type-mismatch`, which is how the two branches were found
-          ;; to disagree (nbb `run-tests.cljs`, 2026-09-02).
+          ;; to disagree (nbb `run-tests.cljk`, 2026-09-02).
           #?(:clj (long count) :cljs (i64/->bigint count)))
 
         (contains? '#{+ - * quot bit-xor bit-and bit-or min max = < > <= >=} op)

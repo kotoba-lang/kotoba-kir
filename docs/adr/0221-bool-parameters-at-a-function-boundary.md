@@ -49,7 +49,7 @@ one `(not= :bool type)` guard — `native-word-value-type?` has listed `:bool`
 since it was written, and that guard was what withheld it.
 
 It is admitted only because the oracle demonstrably executes one first.
-`test/kotoba/kir_bool_parameter_test.clj` executes a `:bool` parameter in every
+`test/kotoba/kir_bool_parameter_test.cljk` executes a `:bool` parameter in every
 position one can occupy: crossing the entry boundary, as an `if` test, through
 `bool-not`, through `=`, rebound by `let`, passed into another function's
 `:bool` parameter, populating a `:bool` record field, and returned as a boxed

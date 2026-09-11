@@ -38,7 +38,7 @@ formed.
 
 ## Evidence
 
-`test/kotoba/kir_kernel_dequant_dot_test.cljc`, 13 tests / 812 assertions.
+`test/kotoba/kir_kernel_dequant_dot_test.cljk`, 13 tests / 812 assertions.
 
 The dequantization is compared with an INDEPENDENT port of the C — written
 with the C's own `y++` / `q += 32` pointer walk rather than this file's

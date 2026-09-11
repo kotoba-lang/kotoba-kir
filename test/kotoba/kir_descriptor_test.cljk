@@ -9,7 +9,7 @@
   wire contract needs its own test: if the encoder and a future decoder are
   only ever checked against each other, they can agree on the same mistake.
 
-  `.cljc` since 2026-09-09, and registered in `run-tests.cljs`. It was `.clj`,
+  `.cljc` since 2026-09-09, and registered in `run-tests.cljk`. It was `.clj`,
   which is why `capability-contracts` could throw on ClojureScript for over a
   month with a green suite: the one host where a capability id is a JS BigInt
   was the one host this file never reached."

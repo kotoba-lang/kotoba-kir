@@ -62,7 +62,7 @@ pins that.
 
 ## What is pinned
 
-`test/kotoba/kir_i64_order_test.cljc`, in both lists of `run-tests.cljs`.
+`test/kotoba/kir_i64_order_test.cljk`, in both lists of `run-tests.cljk`.
 Before the fix it reports 13 errors on nbb and passes on the JVM; after, both
 runtimes are green. The duplicate-key case asserts the MESSAGE rather than
 merely that something was thrown — the old behaviour threw too, and a test that

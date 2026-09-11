@@ -19,7 +19,7 @@
   interpreter calls, and the machine that has to walk past that number is a
   CPU rather than this evaluator. aiueos ADR-0195 is where that run lives.
 
-  Runs on BOTH runtimes on purpose (`.cljc`, listed in `run-tests.cljs`). The
+  Runs on BOTH runtimes on purpose (`.cljc`, listed in `run-tests.cljk`). The
   ceiling exists because of what the counter does on Node, so a JVM-only test
   would be asserting the constraint on the runtime it was not chosen for."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
